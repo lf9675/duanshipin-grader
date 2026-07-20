@@ -10,6 +10,7 @@ video_engine.py — 短视频批改引擎
 """
 
 import base64
+import io
 import json
 import re
 import urllib.request
@@ -27,15 +28,23 @@ DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 GLM_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
 
-def _post_json(url, api_key, payload):
+def _post_json(url, api_key, payload, label="API"):
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {api_key}"},
         method="POST")
-    with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # 2026-07-20 修复：400裸报错无法定位，读出API返回的具体原因
+        try:
+            body = e.read().decode("utf-8", errors="ignore")[:300]
+        except Exception:
+            body = ""
+        raise RuntimeError(f"{label} HTTP {e.code}: {body}") from None
 
 
 def _extract_json(text):
@@ -67,27 +76,48 @@ def grade_text(deepseek_key, topic, student_ids, segments, metrics):
                                                 segments, metrics)},
         ],
     }
-    data = _post_json(DEEPSEEK_URL, deepseek_key, payload)
+    data = _post_json(DEEPSEEK_URL, deepseek_key, payload, label="DeepSeek")
     return _extract_json(data["choices"][0]["message"]["content"])
 
 
+def _contact_sheet(frame_paths):
+    """2026-07-20 修复：glm-4v-flash 单次请求只接受一张图片，
+    把 8 张关键帧拼成一张 2 行×4 列的拼贴图（还省算力）。返回 jpeg bytes。"""
+    from PIL import Image
+    imgs = [Image.open(p).convert("RGB") for p in frame_paths[:8]]
+    cell_w = 480
+    cells = []
+    for im in imgs:
+        h = int(im.height * cell_w / im.width)
+        cells.append(im.resize((cell_w, h)))
+    cell_h = max(c.height for c in cells)
+    cols, rows = 4, (len(cells) + 3) // 4
+    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), (255, 255, 255))
+    for i, c in enumerate(cells):
+        sheet.paste(c, ((i % cols) * cell_w, (i // cols) * cell_h))
+    buf = io.BytesIO()
+    sheet.save(buf, format="JPEG", quality=80)
+    return buf.getvalue()
+
+
 def grade_frames(glm_key, frame_paths, n_students):
-    """frame_paths: 会话临时目录里的 jpg 路径列表。"""
-    content = []
-    for p in frame_paths:
-        with open(p, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
-        content.append({"type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    prompt = FRAMES_GRADING_PROMPT.format(n=len(frame_paths),
+    """frame_paths: 会话临时目录里的 jpg 路径列表。拼成单图后送 GLM。"""
+    b64 = base64.b64encode(_contact_sheet(frame_paths)).decode()
+    prompt = FRAMES_GRADING_PROMPT.format(n=len(frame_paths[:8]),
                                           n_students=n_students)
-    content.append({"type": "text", "text": prompt})
+    prompt = ("下面这张图是按时间顺序从左到右、从上到下排列的关键帧拼贴。\n"
+              + prompt)
+    content = [
+        {"type": "image_url",
+         "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        {"type": "text", "text": prompt},
+    ]
     payload = {
         "model": "glm-4v-flash",   # 帧判定任务较简单，先用 flash 省算力；不准再升 glm-4v
         "temperature": 0.2,
         "messages": [{"role": "user", "content": content}],
     }
-    data = _post_json(GLM_URL, glm_key, payload)
+    data = _post_json(GLM_URL, glm_key, payload, label="GLM(智谱)")
     return _extract_json(data["choices"][0]["message"]["content"])
 
 
@@ -120,11 +150,17 @@ def grade_one_item(item, frames_dir, deepseek_key, glm_key, topic):
                              segments, metrics)
 
     frames_result = None
+    frames_error = ""
     if frames_dir is not None:
         frame_paths = sorted(frames_dir.glob("frame_*.jpg"))
         if frame_paths:
-            frames_result = grade_frames(glm_key, frame_paths,
-                                         len(student_ids))
+            # 2026-07-20 修复：拍摄维度失败不拖垮整份——DeepSeek 三维度
+            # 照常保存，拍摄维度标"AI未评请手评"，走覆核标黄
+            try:
+                frames_result = grade_frames(glm_key, frame_paths,
+                                             len(student_ids))
+            except Exception as e:
+                frames_error = str(e)[:200]
 
     dims = text_result.get("dimensions", {})
     final_scores = {}
@@ -142,8 +178,10 @@ def grade_one_item(item, frames_dir, deepseek_key, glm_key, topic):
         }
     else:
         final_scores["video"] = 0
+        reason = (f"GLM批改失败（{frames_error}）" if frames_error
+                  else "缺关键帧，AI 未评")
         dims["video"] = {"score": 0, "grade": "?", "confidence": "none",
-                         "comment": "缺关键帧，AI 未评，请老师看视频后手评",
+                         "comment": f"{reason}，请老师看视频后手评",
                          "face_ok": None}
     text_result["dimensions"] = dims
     text_result["engine_version"] = ENGINE_VERSION
