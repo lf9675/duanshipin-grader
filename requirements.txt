@@ -5,3 +5,4 @@ openpyxl
 python-pptx
 faster-whisper
 imageio-ffmpeg
+pillow
