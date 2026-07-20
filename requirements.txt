@@ -3,3 +3,5 @@ psycopg2-binary
 reportlab
 openpyxl
 python-pptx
+faster-whisper
+imageio-ffmpeg

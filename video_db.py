@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS video_batch_items (
     final_scores  JSONB,                  -- 覆核后各维度最终分 {"content":22,...}
     teacher_comment TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL DEFAULT 'pending',
-                  -- pending / graded / confirmed / rejected(打回) / failed
+                  -- uploaded(已传待预处理) / pending(待批改) / graded /
+                  -- confirmed / rejected(打回) / failed
     error_msg     TEXT NOT NULL DEFAULT '',
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (job_id, item_key)
@@ -178,6 +179,63 @@ def set_job_status(job_id, status):
 
 
 # ── items ────────────────────────────────────────────────────
+
+def create_uploaded_item(job_id, item_key, student_ids, source_file):
+    """视频刚上传、还没预处理时插入一行占位（status='uploaded'）。
+    重复上传已批改/已确认的学号不覆盖，避免分批上传互相打架。"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT status FROM video_batch_items WHERE job_id=%s AND item_key=%s",
+            (job_id, item_key))
+        row = cur.fetchone()
+        if row and row["status"] in ("graded", "confirmed", "rejected"):
+            return False  # 已有更进一步的结果，跳过，不覆盖
+        cur.execute(
+            """INSERT INTO video_batch_items
+               (job_id, item_key, student_ids, source_file, status)
+               VALUES (%s,%s,%s,%s,'uploaded')
+               ON CONFLICT (job_id, item_key) DO UPDATE SET
+                 source_file = EXCLUDED.source_file,
+                 status = 'uploaded', updated_at = now()""",
+            (job_id, item_key, json.dumps(student_ids, ensure_ascii=False),
+             source_file))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def next_uploaded_item(job_id):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM video_batch_items "
+            "WHERE job_id=%s AND status='uploaded' ORDER BY item_key LIMIT 1",
+            (job_id,))
+        return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def save_preprocessed(item_id, transcript, metrics, precheck):
+    """预处理完成：写入转写稿/指标/准入预判，状态推进到 pending（可送批改）。"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE video_batch_items SET transcript=%s, metrics=%s, "
+            "precheck=%s, status='pending', error_msg='', updated_at=now() "
+            "WHERE id=%s",
+            (json.dumps(transcript, ensure_ascii=False),
+             json.dumps(metrics, ensure_ascii=False),
+             json.dumps(precheck, ensure_ascii=False), item_id))
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def upsert_item(job_id, item_key, student_ids, source_file,
                 transcript, metrics, precheck):
@@ -256,12 +314,19 @@ def mark_failed(item_id, msg):
 
 
 def retry_failed(job_id):
+    """失败重试分两类：已有转写稿的回 pending 重批（AI调用失败）；
+    没有转写稿的回 uploaded（预处理失败，需重新上传该视频）。"""
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute(
             "UPDATE video_batch_items SET status='pending', error_msg='' "
-            "WHERE job_id=%s AND status='failed'", (job_id,))
+            "WHERE job_id=%s AND status='failed' AND transcript IS NOT NULL",
+            (job_id,))
+        cur.execute(
+            "UPDATE video_batch_items SET status='uploaded', error_msg='' "
+            "WHERE job_id=%s AND status='failed' AND transcript IS NULL",
+            (job_id,))
         conn.commit()
     finally:
         conn.close()
