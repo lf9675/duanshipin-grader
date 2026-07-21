@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS video_batch_items (
     metrics       JSONB,                  -- 口语客观指标
     precheck      JSONB,                  -- 准入检查（自动项+老师勾选项）
     ai_result     JSONB,                  -- DeepSeek + GLM-4V 合并结果
-    final_scores  JSONB,                  -- 覆核后各维度最终分 {"content":22,...}
+    final_scores  JSONB,                  -- 复核后各维度最终分 {"content":22,...}
     teacher_comment TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL DEFAULT 'pending',
                   -- uploaded(已传待预处理) / pending(待批改) / graded /
@@ -145,6 +145,17 @@ def init_schema():
             "WHERE rubric IS NULL",
             (json.dumps(DEFAULT_RUBRIC, ensure_ascii=False),
              DEFAULT_REQUIREMENTS))
+        # 2026-07-21 迁移：给已播种的内置模板和其任务快照补宽严指引
+        cur.execute(
+            "UPDATE video_rubrics SET rubric=%s "
+            "WHERE rubric->>'name' = %s AND NOT (rubric ? 'stance')",
+            (json.dumps(DEFAULT_RUBRIC, ensure_ascii=False),
+             DEFAULT_RUBRIC["name"]))
+        cur.execute(
+            "UPDATE video_batch_jobs SET rubric=%s "
+            "WHERE rubric->>'name' = %s AND NOT (rubric ? 'stance')",
+            (json.dumps(DEFAULT_RUBRIC, ensure_ascii=False),
+             DEFAULT_RUBRIC["name"]))
         conn.commit()
     finally:
         conn.close()
@@ -403,7 +414,7 @@ def retry_failed(job_id):
 
 
 def save_review(item_id, final_scores, teacher_comment, precheck, status):
-    """覆核页保存：最终分、老师批注、人工勾选的准入项、状态。"""
+    """复核页保存：最终分、老师批注、人工勾选的准入项、状态。"""
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -413,6 +424,23 @@ def save_review(item_id, final_scores, teacher_comment, precheck, status):
             (json.dumps(final_scores, ensure_ascii=False), teacher_comment,
              json.dumps(precheck, ensure_ascii=False), status, item_id))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def requeue_for_regrade(job_id):
+    """已批未确认的全部退回待批（转写稿在库，重批不用重传视频）。
+    已确认(confirmed)的不动——老师定过的结果不被机器覆盖。"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE video_batch_items SET status='pending', error_msg='' "
+            "WHERE job_id=%s AND status IN ('graded','failed') "
+            "AND transcript IS NOT NULL", (job_id,))
+        n = cur.rowcount
+        conn.commit()
+        return n
     finally:
         conn.close()
 
