@@ -118,14 +118,18 @@ def compute_metrics(segs, duration):
     }
 
 
-def precheck(metrics):
+def precheck(metrics, pre_cfg=None):
+    """按模板配置预判（2026-07-20 常年化）。上限为 0/1.0 表示不限。"""
+    cfg = pre_cfg or {}
+    max_dur = cfg.get("max_duration_sec", MAX_DURATION_SEC)
+    en_lim = cfg.get("en_ratio_limit", EN_RATIO_LIMIT)
     return {
-        "duration_ok": metrics["duration_sec"] <= MAX_DURATION_SEC,
-        "chinese_ok": metrics["en_char_ratio"] <= EN_RATIO_LIMIT,
+        "duration_ok": (metrics["duration_sec"] <= max_dur) if max_dur else True,
+        "chinese_ok": (metrics["en_char_ratio"] <= en_lim) if en_lim < 1.0 else True,
     }
 
 
-def preprocess_video(video_path, out_dir, model_size="tiny"):
+def preprocess_video(video_path, out_dir, model_size="tiny", pre_cfg=None):
     """核心入口：抽音频/帧 → 转写 → 指标 → 准入预判。
     调用方负责在此函数成功返回后【立刻删除 video_path 原视频】。
     返回 dict：{segments, metrics, precheck, frames}"""
@@ -136,7 +140,7 @@ def preprocess_video(video_path, out_dir, model_size="tiny"):
     model = _load_whisper_model(model_size)
     segs = transcribe(model, wav)
     metrics = compute_metrics(segs, duration)
-    checks = precheck(metrics)
+    checks = precheck(metrics, pre_cfg)
     wav.unlink(missing_ok=True)  # 转写中间产物，不留
     return {"segments": segs, "metrics": metrics, "precheck": checks,
             "frames": frames}
