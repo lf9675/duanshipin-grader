@@ -5,7 +5,7 @@ pages/0_题目与评分标准.py — 作业模板管理（2026-07-20 常年化�
 换年级、换题目、换评分标准都在这里：
   粘贴评分表文字（或上传 docx）→ DeepSeek 解析成结构化标准 →
   老师逐项确认（判定方式可改）→ 保存为模板 → 主页建任务时选择。
-原则：AI 解析结果必须过老师的眼才能保存——覆核原则同样适用于规则本身。
+原则：AI 解析结果必须过老师的眼才能保存——复核原则同样适用于规则本身。
 """
 
 import json
@@ -43,6 +43,8 @@ for r in rubrics:
                 st.caption(f"{lv['grade']} {lv['label']}"
                            f"（{lv['lo']}–{lv['hi']}）：{lv['desc']}")
         pre = rb.get("precheck", {})
+        if rb.get("stance"):
+            st.write(f"**宽严指引**：{rb['stance']}")
         st.write(f"准入：时长≤{pre.get('max_duration_sec') or '不限'}秒 ｜ "
                  f"英文夹杂≤{round(pre.get('en_ratio_limit', 1.0)*100)}% ｜ "
                  f"出镜要求：{'是' if pre.get('face_required') else '否'} ｜ "
@@ -133,8 +135,11 @@ if st.session_state.get("parsed_rubric"):
     with p3:
         pre["face_required"] = st.checkbox(
             "要求面容出镜", value=bool(pre.get("face_required")))
+    rubric["stance"] = st.text_area(
+        "宽严指引（写给 AI 的评分基调，如：中一学生从宽、拍摄清楚即3分起步）",
+        value=rubric.get("stance", ""), height=110)
     manual_str = st.text_input(
-        "人工勾选项（老师覆核时勾，逗号分隔）",
+        "人工勾选项（老师复核时勾，逗号分隔）",
         value="，".join(pre.get("manual_items", [])))
     pre["manual_items"] = [s.strip() for s in
                            manual_str.replace(",", "，").split("，")
