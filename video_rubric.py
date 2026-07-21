@@ -99,6 +99,17 @@ DEFAULT_RUBRIC = {
         "face_required": True,
         "manual_items": ["已提交脚本", "文件命名规范"],
     },
+    # 2026-07-21 新增（刘老师指引）：宽严基调，逐字进入批改提示词
+    "stance": (
+        "本作业对象是中一学生，主要教学目的是练习华语口语表达，"
+        "不是追求专业的短视频制作，总体从宽评分：\n"
+        "1. 步骤讲述：观众大体能跟着做就算基本清楚，不苛求专业细节"
+        "（如器具型号、精确参数），缺个别细节不必压档；\n"
+        "2. 口语表达：以中一学生的日常口语水平为基准，敢开口、"
+        "说得清楚就值得肯定；\n"
+        "3. 拍摄与呈现：画面清楚即给3分起步，较好给4分，出色给5分，"
+        "只有画面严重影响观看才低于3分。"
+    ),
 }
 
 DEFAULT_REQUIREMENTS = (
@@ -114,7 +125,7 @@ JUDGE_LABELS = {
     "manual": "老师手评（AI不判）",
 }
 
-# 口语客观指标的参考区间（覆核标黄用）
+# 口语客观指标的参考区间（复核标黄用）
 SPEECH_RATE_COMFORT = (170, 270)
 PAUSE_MANY = 5
 FILLER_MANY = 8
@@ -215,6 +226,7 @@ def normalize_rubric(rubric):
     pre.setdefault("en_ratio_limit", 1.0)
     pre.setdefault("face_required", False)
     pre.setdefault("manual_items", [])
+    rubric.setdefault("stance", "")
     rubric["total_max"] = sum(d["max"] for d in dims(rubric)
                               if isinstance(d.get("max"), int))
     return rubric
