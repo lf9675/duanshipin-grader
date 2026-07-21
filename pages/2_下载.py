@@ -51,7 +51,7 @@ st.write(f"已确认 {len(confirmed)} 份"
             "、".join(i["item_key"] for i in rejected) if rejected else ""))
 
 if not confirmed:
-    st.info("还没有已确认的份数。请先到「覆核」页确认。")
+    st.info("还没有已确认的份数。请先到「复核」页确认。")
     st.stop()
 
 with_ppt = st.toggle("生成讲评 PPT（需调用一次 DeepSeek 做全班聚合+匿名化）",
