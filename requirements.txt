@@ -6,3 +6,4 @@ python-pptx
 faster-whisper
 imageio-ffmpeg
 pillow
+python-docx
