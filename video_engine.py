@@ -278,11 +278,17 @@ def review_flags(item, rubric):
 
     # 1.5 转写疑似失败（2026-07-21：语速异常低说明转写稿抓不到内容，
     #     残缺转写会导致所有文本维度冤枉学生，必须拦下）
+    # 2026-07-21 实测修正：演示类视频（说一句做一段）语速天然低，
+    # 不能只看语速就判转写失败——同时看总字数才有说服力
     _rate = metrics.get("speech_rate_cpm", 0)
     _dur = metrics.get("duration_sec", 0)
-    if _dur >= 30 and 0 < _rate < 80:
-        flags.append(f"⚠转写疑似失败（语速仅{_rate}字/分）——请查看转写稿；"
-                     f"建议侧栏换 small 模型后重新上传该视频重批")
+    _cjk = metrics.get("char_count_cjk", 0)
+    if _dur >= 60 and _cjk < max(60, _dur * 0.3):
+        flags.append(f"⚠转写内容极少（全片仅{_cjk}字）——可能转写失败，"
+                     f"请核对转写稿；若确属失败请换 small 模型重传该视频")
+    elif _dur >= 30 and 0 < _rate < 80:
+        flags.append(f"语速偏低（{_rate}字/分）——若是做菜/演示类留白属正常，"
+                     f"请顺带核对转写稿是否完整")
 
     # 2. 口语类维度：指标与 AI 建议档矛盾
     speech_keys = [d["key"] for d in dims_of_judge(rubric, ("text_speech",))]
