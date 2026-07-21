@@ -40,10 +40,13 @@ def build_text_grading_system(rubric, requirements):
             f"3. 口语类维度（{', '.join(speech_keys)}）你只能从文本和客观指标间接判断"
             f"（流畅度、语速、停顿、填充词、口头禅），咬字和感染力你听不到——"
             f"这些维度必须 confidence 标 \"low\"，并在 note 写明老师需要抽听确认什么。\n")
+    stance = rubric.get("stance", "")
+    stance_block = (f"【宽严指引（老师定，必须遵守）】\n{stance}\n\n"
+                    if stance else "")
     return f"""你是新加坡中学华文老师的批改助手。学生的作业是拍短视频，本次作业要求如下：
 {requirements or '（老师未填写具体要求）'}
 
-你收到的是视频的【语音转写稿】（带时间戳）和【口语客观指标】。请只评下列维度（画面类维度由另一个系统评，老师手评类维度不用你评）：
+{stance_block}你收到的是视频的【语音转写稿】（带时间戳）和【口语客观指标】。请只评下列维度（画面类维度由另一个系统评，老师手评类维度不用你评）：
 
 {rubric_text_for_prompt(rubric, ('text', 'text_speech'))}
 
@@ -95,6 +98,9 @@ def _fmt_t(sec):
 # ─────────────────────────────────────────────────────────────
 
 def build_frames_prompt(rubric, n_frames, n_students, requirements):
+    stance = rubric.get("stance", "")
+    stance_block = (f"【宽严指引（老师定，必须遵守）】\n{stance}\n\n"
+                    if stance else "")
     frame_dims = dims_of_judge(rubric, ("frames",))
     face_req = rubric.get("precheck", {}).get("face_required", False)
     face_field = ('"face_ok": true或false, ' if face_req else "")
@@ -110,7 +116,7 @@ def build_frames_prompt(rubric, n_frames, n_students, requirements):
 
 {rubric_text_for_prompt(rubric, ('frames',))}
 
-判断要点：
+{stance_block}判断要点：
 1. 你看不到动态画面和剪辑，只按静帧判断，把不确定写进 note。
 {face_rule}3. 画面是否清晰（对焦、光线）、构图是否合理、演示对象是否看得清楚。
 
