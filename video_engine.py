@@ -5,11 +5,11 @@ video_engine.py — 短视频批改引擎（2026-07-20 常年化改版）
 - 按任务快照的评分标准(rubric)动态批改：
     text / text_speech 维度 → DeepSeek 读转写稿+指标
     frames 维度            → GLM-4V 看关键帧拼贴图（单图，flash 兼容）
-    manual 维度            → AI 不评，标"请老师手评"进覆核
+    manual 维度            → AI 不评，标"请老师手评"进复核
 - parse_rubric_text()：DeepSeek 把老师粘贴的评分表解析成结构化模板
 - 两个客户端 180 秒硬超时；HTTP 报错带 API 名和响应体详情
 - 拍摄/画面维度批改失败降级不拖垮整份（2026-07-20 修复保留）
-- review_flags(item, rubric)：覆核标黄规则按模板配置通用化
+- review_flags(item, rubric)：复核标黄规则按模板配置通用化
 """
 
 import base64
@@ -62,7 +62,10 @@ def _extract_json(text):
         elif text[i] == "}":
             depth -= 1
             if depth == 0:
-                return json.loads(text[start:i + 1])
+                blob = text[start:i + 1]
+                # 2026-07-21 修复：GLM 偶发返回带尾逗号的 JSON，容错清理
+                blob = re.sub(r",\s*([}\]])", r"\1", blob)
+                return json.loads(blob)
     raise ValueError("AI 回复 JSON 不完整")
 
 
@@ -236,7 +239,7 @@ def grade_one_item(item, frames_dir, deepseek_key, glm_key, topic,
 
 
 # ─────────────────────────────────────────────────────────────
-# 覆核标黄规则（按模板配置通用化）
+# 复核标黄规则（按模板配置通用化）
 # ─────────────────────────────────────────────────────────────
 
 def review_flags(item, rubric):
@@ -272,6 +275,14 @@ def review_flags(item, rubric):
             if info.get("face_ok") is False:
                 flags.append("关键帧未见面容出镜（请亲眼确认）")
                 break
+
+    # 1.5 转写疑似失败（2026-07-21：语速异常低说明转写稿抓不到内容，
+    #     残缺转写会导致所有文本维度冤枉学生，必须拦下）
+    _rate = metrics.get("speech_rate_cpm", 0)
+    _dur = metrics.get("duration_sec", 0)
+    if _dur >= 30 and 0 < _rate < 80:
+        flags.append(f"⚠转写疑似失败（语速仅{_rate}字/分）——请查看转写稿；"
+                     f"建议侧栏换 small 模型后重新上传该视频重批")
 
     # 2. 口语类维度：指标与 AI 建议档矛盾
     speech_keys = [d["key"] for d in dims_of_judge(rubric, ("text_speech",))]
