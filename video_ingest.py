@@ -5,7 +5,7 @@ video_ingest.py — 服务器端视频预处理
 逻辑移植自 local_tool/yuchuli.py，改为在 Streamlit Cloud 服务器上跑：
   抽音频(mp3) → 抽关键帧(8张) → 本地模型转写 → 算口语指标 → 准入预判
 原始视频【提取完成后立刻删除】——不等整条批改流程走完，留存时间最短。
-只有 audio.mp3 + frame_*.jpg 留在会话临时目录（供覆核抽听/不入库），
+只有 audio.mp3 + frame_*.jpg 留在会话临时目录（供复核抽听/不入库），
 transcript/metrics/precheck 三样纯文本才写入数据库。
 
 2026-07-20 决策：云端算力有限，转写模型默认 tiny 档；classroom 场景
@@ -129,7 +129,7 @@ def precheck(metrics, pre_cfg=None):
     }
 
 
-def preprocess_video(video_path, out_dir, model_size="tiny", pre_cfg=None):
+def preprocess_video(video_path, out_dir, model_size="small", pre_cfg=None):
     """核心入口：抽音频/帧 → 转写 → 指标 → 准入预判。
     调用方负责在此函数成功返回后【立刻删除 video_path 原视频】。
     返回 dict：{segments, metrics, precheck, frames}"""
