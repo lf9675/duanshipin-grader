@@ -82,6 +82,14 @@ def get_conn():
 
 
 DDL = """
+CREATE TABLE IF NOT EXISTS video_rubrics (
+    id          BIGSERIAL PRIMARY KEY,
+    teacher_id  TEXT NOT NULL DEFAULT 'default',
+    name        TEXT NOT NULL,
+    rubric      JSONB NOT NULL,           -- 评分标准（结构见 video_rubric.py）
+    requirements TEXT NOT NULL DEFAULT '', -- 题目要求默认文本
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS video_batch_jobs (
     id          BIGSERIAL PRIMARY KEY,
     teacher_id  TEXT NOT NULL DEFAULT 'default',
@@ -90,6 +98,9 @@ CREATE TABLE IF NOT EXISTS video_batch_jobs (
     status      TEXT NOT NULL DEFAULT 'grading',  -- grading / reviewing / done
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 2026-07-20 常年化：任务保存模板【快照】，改模板不影响历史任务
+ALTER TABLE video_batch_jobs ADD COLUMN IF NOT EXISTS rubric JSONB;
+ALTER TABLE video_batch_jobs ADD COLUMN IF NOT EXISTS requirements TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS video_batch_items (
     id            BIGSERIAL PRIMARY KEY,
     job_id        BIGINT NOT NULL REFERENCES video_batch_jobs(id) ON DELETE CASCADE,
@@ -114,10 +125,66 @@ CREATE INDEX IF NOT EXISTS idx_video_items_job ON video_batch_items(job_id);
 
 
 def init_schema():
+    from video_rubric import DEFAULT_RUBRIC, DEFAULT_REQUIREMENTS
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute(DDL)
+        # 播种内置模板（首次运行）
+        cur.execute("SELECT count(*) FROM video_rubrics")
+        if cur.fetchone()[0] == 0:
+            cur.execute(
+                "INSERT INTO video_rubrics (name, rubric, requirements) "
+                "VALUES (%s, %s, %s)",
+                (DEFAULT_RUBRIC["name"],
+                 json.dumps(DEFAULT_RUBRIC, ensure_ascii=False),
+                 DEFAULT_REQUIREMENTS))
+        # 老任务回填默认模板快照（升级兼容）
+        cur.execute(
+            "UPDATE video_batch_jobs SET rubric=%s, requirements=%s "
+            "WHERE rubric IS NULL",
+            (json.dumps(DEFAULT_RUBRIC, ensure_ascii=False),
+             DEFAULT_REQUIREMENTS))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── rubric 模板 ──────────────────────────────────────────────
+
+def list_rubrics(teacher_id="default"):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM video_rubrics WHERE teacher_id=%s "
+                    "ORDER BY id", (teacher_id,))
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def create_rubric(name, rubric, requirements, teacher_id="default"):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO video_rubrics (teacher_id, name, rubric, requirements) "
+            "VALUES (%s,%s,%s,%s) RETURNING id",
+            (teacher_id, name, json.dumps(rubric, ensure_ascii=False),
+             requirements))
+        rid = cur.fetchone()[0]
+        conn.commit()
+        return rid
+    finally:
+        conn.close()
+
+
+def delete_rubric(rubric_id):
+    """只删模板本身；历史任务持有快照不受影响。"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM video_rubrics WHERE id=%s", (rubric_id,))
         conn.commit()
     finally:
         conn.close()
@@ -125,14 +192,17 @@ def init_schema():
 
 # ── jobs ─────────────────────────────────────────────────────
 
-def create_job(class_name, topic, teacher_id="default"):
+def create_job(class_name, topic, rubric, requirements, teacher_id="default"):
+    """rubric 以【快照】形式存入任务（2026-07-20 决策）。"""
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO video_batch_jobs (teacher_id, class_name, topic) "
-            "VALUES (%s, %s, %s) RETURNING id",
-            (teacher_id, class_name, topic))
+            "INSERT INTO video_batch_jobs "
+            "(teacher_id, class_name, topic, rubric, requirements) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (teacher_id, class_name, topic,
+             json.dumps(rubric, ensure_ascii=False), requirements))
         job_id = cur.fetchone()[0]
         conn.commit()
         return job_id
