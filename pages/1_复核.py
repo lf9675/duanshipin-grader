@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-pages/1_覆核.py — 覆核总表（P0 环节）
+pages/1_复核.py — 复核总表（P0 环节）
 ════════════════════════════════════
 原则：宁可老师多看一眼，不能带错发出去。
 - 总表一行一份，异常自动标黄（准入异常/口语矛盾/极端总分/缺评/失败）
@@ -15,10 +15,10 @@ from pathlib import Path
 import streamlit as st
 
 import video_db as db
-from video_rubric import DIMENSIONS, DIM_BY_KEY, PRECHECK_ITEMS, level_of
+from video_rubric import dims, level_of, JUDGE_LABELS
 from video_engine import review_flags, total_of
 
-st.set_page_config(page_title="覆核 · 短视频批改", page_icon="✅",
+st.set_page_config(page_title="复核 · 短视频批改", page_icon="✅",
                    layout="wide")
 if not st.session_state.get("authed"):
     st.warning("请先在主页输入平台口令")
@@ -30,7 +30,11 @@ if not job_id:
     st.stop()
 
 job = db.get_job(job_id)
-st.title(f"✅ 覆核 — {job['class_name']}《{job['topic']}》")
+RUBRIC = job["rubric"] if not isinstance(job["rubric"], str) else json.loads(job["rubric"])
+DIMS = dims(RUBRIC)
+PRE_CFG = RUBRIC.get("precheck", {})
+st.title(f"✅ 复核 — {job['class_name']}《{job['topic']}》")
+st.caption(f"评分标准：{RUBRIC.get('name','')}")
 
 items = [dict(i) for i in db.list_items(job_id)]
 for it in items:
@@ -43,13 +47,13 @@ for it in items:
                 pass
 
 flagged = []
-st.subheader("覆核总表")
+st.subheader("复核总表")
 hdr = st.columns([1.2, 1, 1, 3.2, 3.2, 1.4])
-for c, t in zip(hdr, ["学号", "总分", "状态", "主要问题", "覆核提示", ""]):
+for c, t in zip(hdr, ["学号", "总分", "状态", "主要问题", "复核提示", ""]):
     c.markdown(f"**{t}**")
 
 for it in items:
-    flags = review_flags(it)
+    flags = review_flags(it, RUBRIC)
     if flags and it["status"] in ("graded", "failed"):
         flagged.append(it["item_key"])
     ai = it.get("ai_result") or {}
@@ -93,8 +97,8 @@ if open_id:
                  f"“然后” {metrics.get('ranhou_count', '?')} 次")
 
         new_scores = {}
-        sc_cols = st.columns(4)
-        for i, d in enumerate(DIMENSIONS):
+        sc_cols = st.columns(max(len(DIMS), 1))
+        for i, d in enumerate(DIMS):
             k = d["key"]
             info = dims.get(k, {})
             with sc_cols[i]:
@@ -102,7 +106,7 @@ if open_id:
                     f"{d['name']} /{d['max']}",
                     min_value=0, max_value=d["max"],
                     value=int(fs.get(k, 0)), key=f"sc_{it['id']}_{k}")
-                lv = level_of(k, new_scores[k])
+                lv = level_of(d, new_scores[k])
                 conf = info.get("confidence", "")
                 tail = " ⚠AI仅参考" if conf in ("low", "none") else ""
                 st.caption(f"{lv['grade']} {lv['label']}{tail}")
@@ -112,7 +116,7 @@ if open_id:
                     st.caption(f"📌 {info['note']}")
 
         with st.expander("逐维度证据与问题（AI 原始输出）"):
-            for d in DIMENSIONS:
+            for d in DIMS:
                 info = dims.get(d["key"], {})
                 if not info:
                     continue
@@ -130,12 +134,23 @@ if open_id:
                          f"{s['text']}")
 
         pre = dict(it.get("precheck") or {})
-        st.markdown("**准入检查**（前三项自动预判，后两项请勾选）")
-        pc_cols = st.columns(len(PRECHECK_ITEMS))
-        for i, (k, label) in enumerate(PRECHECK_ITEMS.items()):
-            with pc_cols[i]:
-                pre[k] = st.checkbox(label, value=bool(pre.get(k, True)),
-                                     key=f"pc_{it['id']}_{k}")
+        auto_items = []
+        if PRE_CFG.get("max_duration_sec"):
+            auto_items.append(("duration_ok",
+                               f"时长 ≤ {PRE_CFG['max_duration_sec']}秒"))
+        if PRE_CFG.get("en_ratio_limit", 1.0) < 1.0:
+            auto_items.append(("chinese_ok",
+                f"外语夹杂 ≤ {round(PRE_CFG['en_ratio_limit']*100)}%"))
+        manual_items = [(f"m_{i}", label) for i, label in
+                        enumerate(PRE_CFG.get("manual_items", []))]
+        all_items = auto_items + manual_items
+        if all_items:
+            st.markdown("**准入检查**（自动预判项可覆盖，人工项请勾选）")
+            pc_cols = st.columns(len(all_items))
+            for i, (k, label) in enumerate(all_items):
+                with pc_cols[i]:
+                    pre[k] = st.checkbox(label, value=bool(pre.get(k, True)),
+                                         key=f"pc_{it['id']}_{k}")
 
         comment = st.text_area("老师批注（会进学生 PDF 的「老师的话」）",
                                value=it.get("teacher_comment", ""),
