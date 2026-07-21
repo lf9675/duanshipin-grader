@@ -30,6 +30,7 @@ if not job_id:
     st.stop()
 
 job = db.get_job(job_id)
+RUBRIC = job["rubric"] if not isinstance(job["rubric"], str) else json.loads(job["rubric"])
 st.title(f"📦 下载 — {job['class_name']}《{job['topic']}》")
 st.caption(f"导出版本 {EXPORT_VERSION}")
 
@@ -87,7 +88,7 @@ if st.button("🏗 生成全部文件", type="primary"):
     with st.spinner("正在生成 PDF / Excel / PPT 并打包…"):
         try:
             blob = build_all_zip(confirmed, job["class_name"],
-                                 job["topic"], agg)
+                                 job["topic"], RUBRIC, agg)
             st.session_state.final_zip = blob
             st.session_state.final_zip_name = (
                 f"{job['class_name']}_短视频批改_"
