@@ -13,7 +13,7 @@ app.py — 华文通·短视频批改 主页（上传 + 队列）
     阶段一 预处理：uploaded → pending（视频→音频/帧/转写稿，删视频）
     阶段二 批改：  pending → graded（DeepSeek + GLM-4V）
 - 转写稿等文本入库；音频/关键帧只存会话临时目录（PDPA：不入库）。
-  断线后转写稿还在，批改可续；仅覆核抽听和拍摄维度需要的媒体文件
+  断线后转写稿还在，批改可续；仅复核抽听和拍摄维度需要的媒体文件
   会丢失——重传对应视频即可补。
 - 备用通道：仍支持上传本地工具生成的批改包 zip（家里电脑可装 Python 时）。
 """
@@ -64,15 +64,15 @@ with st.sidebar:
         type="password")
     st.caption("钥匙只保存在本次会话内存，不写入数据库。")
     st.divider()
-    st.session_state.setdefault("whisper_size", "tiny")
+    st.session_state.setdefault("whisper_size", "small")
     st.session_state.whisper_size = st.selectbox(
-        "转写模型", ["tiny", "small"],
-        index=["tiny", "small"].index(st.session_state.whisper_size),
-        help="tiny：快，云端默认；small：更准但明显更慢。"
-             "先用 tiny 试批 3-5 份看转写质量，不够再换。")
+        "转写模型", ["small", "tiny"],
+        index=["small", "tiny"].index(st.session_state.whisper_size),
+        help="small：准确优先，云端默认（2026-07-21 起）；"
+             "tiny：快一倍但对口音和噪音抵抗力差，容易转写失败。")
 
 st.title("🎬 华文通 · 短视频批改")
-st.caption("直接上传视频 → 服务器转写 → 队列批改 → 覆核 → 下载。"
+st.caption("直接上传视频 → 服务器转写 → 队列批改 → 复核 → 下载。"
            "每个视频提取完音频和画面后**立刻从服务器删除**。")
 
 
@@ -247,8 +247,14 @@ if job_id:
             st.session_state.queue_running = True
             st.rerun()
     with c3:
-        if done == total and total > 0:
-            st.success("批改完成！请到左侧「覆核」页逐项确认。")
+        n_regr = sum(1 for i in items if i["status"] in ("graded", "failed"))
+        if n_regr and st.button(f"↻ 重批 {n_regr} 份（按最新指引）",
+                                help="评分指引/模板更新后使用；已确认的不重批"):
+            db.requeue_for_regrade(job_id)
+            st.session_state.queue_running = True
+            st.rerun()
+    if done == total and total > 0:
+        st.success("批改完成！请到左侧「复核」页逐项确认。")
 
     _job = db.get_job(job_id)
     _job_rubric = _job["rubric"] if not isinstance(_job["rubric"], str) else json.loads(_job["rubric"])
