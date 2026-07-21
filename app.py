@@ -97,8 +97,18 @@ with col1:
     class_name = st.text_input("班级",
                                value=st.session_state.get("class_name", ""))
 with col2:
-    topic = st.text_input("本次技能主题（如：教一项你会的技能）",
+    topic = st.text_input("题目（如：教一项你会的技能）",
                           value=st.session_state.get("topic", ""))
+
+# ── 选择作业模板（2026-07-20 常年化）──
+rubs = db.list_rubrics()
+rub_labels = {f"{r['name']}": r for r in rubs}
+sel_rub = st.selectbox("评分标准（作业模板）", list(rub_labels),
+                       help="换题目/换标准请到「题目与评分标准」页新建模板")
+_r = rub_labels[sel_rub]
+_rubric = _r["rubric"] if not isinstance(_r["rubric"], str) else json.loads(_r["rubric"])
+requirements = st.text_area("题目要求（写进批改提示词）",
+                            value=_r["requirements"] or "", height=90)
 
 ups = st.file_uploader(
     "选择学生视频（可多选；命名：个人 05.mp4，两人组 05_12.mp4）",
@@ -114,7 +124,7 @@ if ups:
     elif st.button("📥 入队开始处理", type="primary", disabled=not class_name):
         job_id = st.session_state.get("job_id")
         if not job_id:
-            job_id = db.create_job(class_name, topic)
+            job_id = db.create_job(class_name, topic, _rubric, requirements)
             st.session_state.job_id = job_id
         st.session_state.class_name = class_name
         st.session_state.topic = topic
@@ -144,7 +154,7 @@ with st.expander("备用通道：上传本地工具生成的批改包 zip"):
     if up_zip is not None and st.button("📥 批改包入队", disabled=not class_name):
         job_id = st.session_state.get("job_id")
         if not job_id:
-            job_id = db.create_job(class_name, topic)
+            job_id = db.create_job(class_name, topic, _rubric, requirements)
             st.session_state.job_id = job_id
         st.session_state.class_name = class_name
         st.session_state.topic = topic
@@ -240,6 +250,9 @@ if job_id:
         if done == total and total > 0:
             st.success("批改完成！请到左侧「覆核」页逐项确认。")
 
+    _job = db.get_job(job_id)
+    _job_rubric = _job["rubric"] if not isinstance(_job["rubric"], str) else json.loads(_job["rubric"])
+    _job_req = _job["requirements"] or ""
     if running:
         # ── 阶段一：预处理（视频→音频/帧/转写，随即删视频）──
         upl = db.next_uploaded_item(job_id)
@@ -260,7 +273,8 @@ if job_id:
                     try:
                         result = ingest.preprocess_video(
                             vids[0], out_dir,
-                            model_size=st.session_state.whisper_size)
+                            model_size=st.session_state.whisper_size,
+                            pre_cfg=_job_rubric.get("precheck", {}))
                         db.save_preprocessed(upl["id"], result["segments"],
                                              result["metrics"],
                                              result["precheck"])
@@ -292,7 +306,7 @@ if job_id:
                                 dict(nxt), fdir,
                                 st.session_state.deepseek_key,
                                 st.session_state.glm_key,
-                                st.session_state.get("topic", ""))
+                                _job["topic"], _job_rubric, _job_req)
                             db.save_ai_result(nxt["id"], ai, fs)
                         except Exception as e:
                             db.mark_failed(nxt["id"], e)
