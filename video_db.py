@@ -145,17 +145,20 @@ def init_schema():
             "WHERE rubric IS NULL",
             (json.dumps(DEFAULT_RUBRIC, ensure_ascii=False),
              DEFAULT_REQUIREMENTS))
-        # 2026-07-21 迁移：给已播种的内置模板和其任务快照补宽严指引
+        # 2026-07-21 迁移v2：内置模板（及其任务快照）始终与代码内
+        # DEFAULT_RUBRIC 同步——内置模板是代码资产，锚点更新要跟上
         cur.execute(
             "UPDATE video_rubrics SET rubric=%s "
-            "WHERE rubric->>'name' = %s AND NOT (rubric ? 'stance')",
+            "WHERE rubric->>'name' = %s "
+            "AND rubric->>'stance' IS DISTINCT FROM %s",
             (json.dumps(DEFAULT_RUBRIC, ensure_ascii=False),
-             DEFAULT_RUBRIC["name"]))
+             DEFAULT_RUBRIC["name"], DEFAULT_RUBRIC["stance"]))
         cur.execute(
             "UPDATE video_batch_jobs SET rubric=%s "
-            "WHERE rubric->>'name' = %s AND NOT (rubric ? 'stance')",
+            "WHERE rubric->>'name' = %s "
+            "AND rubric->>'stance' IS DISTINCT FROM %s",
             (json.dumps(DEFAULT_RUBRIC, ensure_ascii=False),
-             DEFAULT_RUBRIC["name"]))
+             DEFAULT_RUBRIC["name"], DEFAULT_RUBRIC["stance"]))
         conn.commit()
     finally:
         conn.close()
