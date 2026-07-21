@@ -193,7 +193,7 @@ def build_student_pdf(item, class_name, topic, rubric):
 
     story.append(Spacer(1, 4 * mm))
     story.append(Paragraph(
-        f"华文通·短视频批改 {EXPORT_VERSION} ｜ AI 批改 + 老师覆核", st["sub"]))
+        f"华文通·短视频批改 {EXPORT_VERSION} ｜ AI 批改 + 老师复核", st["sub"]))
     doc.build(story)
     return buf.getvalue()
 
@@ -212,7 +212,7 @@ def build_class_excel(items, class_name, topic, rubric):
     header = (["学号", "组"]
               + [f"{d['name']}/{d['max']}" for d in DIMS]
               + [f"总分/{TM}", "主要问题", "突出优点",
-                 "距上一档建议", "覆核提示", "教师最终评分（手写录入）"])
+                 "距上一档建议", "复核提示", "教师最终评分（手写录入）"])
     ws.append([f"{class_name} 短视频作业 ｜ 题目：{topic} ｜ {_sg_today()}"])
     ws.append(header)
     yellow = PatternFill("solid", start_color="FFF3CD")
@@ -290,7 +290,7 @@ def build_review_ppt(agg, class_name, topic, grade_dist):
     # 封面
     s = _slide(prs)
     _txt(s, 1.2, 2.2, 11, 1.2, f"《{topic}》短视频作业讲评", 44, True, _PPT_NAVY)
-    _txt(s, 1.2, 3.6, 11, 0.8, f"{class_name} ｜ {_sg_today()} ｜ AI 辅助整理 · 老师覆核",
+    _txt(s, 1.2, 3.6, 11, 0.8, f"{class_name} ｜ {_sg_today()} ｜ AI 辅助整理 · 老师复核",
          20, False, _PPT_DARK)
 
     # 总览
