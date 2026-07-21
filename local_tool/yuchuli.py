@@ -3,7 +3,7 @@
 短视频批改 · 本地预处理工具  yuchuli.py
 ========================================
 用途：把学生视频（大文件）在老师电脑上本地处理成"轻量批改包"：
-  - 音频 mp3（覆核时抽听用，约 1MB/份）
+  - 音频 mp3（复核时抽听用，约 1MB/份）
   - 转写稿 transcript.json（带时间戳，AI 批改的主要依据）
   - 口语客观指标（语速/停顿/填充词/华英比例，本地算好）
   - 关键帧 8 张 jpg（GLM-4V 判"拍摄与呈现"和面容出镜）
@@ -117,7 +117,7 @@ def transcribe(model, wav):
 
 
 def compute_metrics(segs, duration):
-    """口语客观指标：仅作教师覆核参考，不直接决定分数。"""
+    """口语客观指标：仅作教师复核参考，不直接决定分数。"""
     full_text = "".join(s["text"] for s in segs)
     cjk = len(re.findall(r"[\u4e00-\u9fff]", full_text))
     latin = len(re.findall(r"[A-Za-z]", full_text))
