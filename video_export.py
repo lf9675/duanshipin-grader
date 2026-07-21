@@ -31,7 +31,7 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 
-from video_rubric import DIMENSIONS, DIM_BY_KEY, TOTAL_MAX, level_of
+from video_rubric import dims, total_max, level_of
 from video_engine import total_of, review_flags
 
 EXPORT_VERSION = "video-1.0-20260720"
@@ -93,16 +93,18 @@ def _esc(t):
 # 每生 PDF
 # ─────────────────────────────────────────────────────────────
 
-def build_student_pdf(item, class_name, topic):
+def build_student_pdf(item, class_name, topic, rubric):
     """item: video_batch_items 行（dict 化）。返回 bytes。"""
     _register_fonts()
     st = _styles()
     ai = item.get("ai_result") or {}
-    dims = ai.get("dimensions", {})
+    dims_r = ai.get("dimensions", {})
     fs = item.get("final_scores") or {}
     metrics = item.get("metrics") or {}
     ids = item.get("student_ids") or []
     total = total_of(fs)
+    DIMS = dims(rubric)
+    TM = total_max(rubric)
 
     buf = io.BytesIO()
     doc = BaseDocTemplate(buf, pagesize=A4,
@@ -115,22 +117,22 @@ def build_student_pdf(item, class_name, topic):
     story.append(Paragraph("短视频作业批改报告", st["title"]))
     story.append(Paragraph(
         f"班级 {_esc(class_name)} ｜ 学号 {_esc('、'.join(ids))} ｜ "
-        f"技能主题 {_esc(topic)} ｜ {_sg_today()}", st["sub"]))
+        f"题目 {_esc(topic)} ｜ {_sg_today()}", st["sub"]))
     story.append(Spacer(1, 5 * mm))
 
     # 总评 + 总分
-    story.append(Paragraph(f"<b>总分：{total} / {TOTAL_MAX}</b>　　"
+    story.append(Paragraph(f"<b>总分：{total} / {TM}</b>　　"
                            f"{_esc(ai.get('one_line_comment', ''))}", st["body"]))
     story.append(Spacer(1, 3 * mm))
 
     # 四维度分数表
     rows = [["评分维度", "等级", "得分", "评语"]]
-    for d in DIMENSIONS:
+    for d in DIMS:
         k = d["key"]
         sc = fs.get(k, 0)
-        lv = level_of(k, sc)
-        comment = dims.get(k, {}).get("comment", "")
-        if k == "speaking":
+        lv = level_of(d, sc)
+        comment = dims_r.get(k, {}).get("comment", "")
+        if d.get("judge") == "text_speech":
             comment = (comment + " ※此维度AI仅供参考，以老师听后判断为准").strip()
         rows.append([f"{d['name']}（{d['max']}分）",
                      f"{lv['grade']} {lv['label']}", f"{sc}",
@@ -151,8 +153,8 @@ def build_student_pdf(item, class_name, topic):
     # 问题与改法（why_and_how 底线）
     story.append(Paragraph("需要改进的地方（为什么 + 怎么改）", st["sec"]))
     n = 0
-    for d in DIMENSIONS:
-        for iss in dims.get(d["key"], {}).get("issues", []):
+    for d in DIMS:
+        for iss in dims_r.get(d["key"], {}).get("issues", []):
             n += 1
             story.append(Paragraph(
                 f"<b>{n}. [{d['name']}] {_esc(iss.get('problem', ''))}</b>",
@@ -200,15 +202,18 @@ def build_student_pdf(item, class_name, topic):
 # 全班 Excel
 # ─────────────────────────────────────────────────────────────
 
-def build_class_excel(items, class_name, topic):
+def build_class_excel(items, class_name, topic, rubric):
     """一行一个学生（两人组各占一行）。返回 bytes。"""
     wb = Workbook()
     ws = wb.active
     ws.title = "短视频成绩总表"
-    header = ["学号", "组", "步骤讲述/25", "口语表达/20", "内容设计/10",
-              "拍摄呈现/5", "总分/60", "主要问题", "突出优点",
-              "距上一档建议", "覆核提示", "教师最终评分（手写录入）"]
-    ws.append([f"{class_name} 短视频作业 ｜ 主题：{topic} ｜ {_sg_today()}"])
+    DIMS = dims(rubric)
+    TM = total_max(rubric)
+    header = (["学号", "组"]
+              + [f"{d['name']}/{d['max']}" for d in DIMS]
+              + [f"总分/{TM}", "主要问题", "突出优点",
+                 "距上一档建议", "覆核提示", "教师最终评分（手写录入）"])
+    ws.append([f"{class_name} 短视频作业 ｜ 题目：{topic} ｜ {_sg_today()}"])
     ws.append(header)
     yellow = PatternFill("solid", start_color="FFF3CD")
     for c in ws[2]:
@@ -216,24 +221,24 @@ def build_class_excel(items, class_name, topic):
     for it in items:
         ai = it.get("ai_result") or {}
         fs = it.get("final_scores") or {}
-        flags = review_flags(it)
+        flags = review_flags(it, rubric)
         ids = it.get("student_ids") or []
         group = "_".join(ids) if len(ids) > 1 else ""
         for sid in ids:
-            row = [sid, group,
-                   fs.get("content", ""), fs.get("speaking", ""),
-                   fs.get("design", ""), fs.get("video", ""),
-                   total_of(fs),
-                   ai.get("top_issue", ""), ai.get("top_strength", ""),
-                   ai.get("next_level_advice", ""),
-                   "；".join(flags), ""]
+            row = ([sid, group]
+                   + [fs.get(d["key"], "") for d in DIMS]
+                   + [total_of(fs),
+                      ai.get("top_issue", ""), ai.get("top_strength", ""),
+                      ai.get("next_level_advice", ""),
+                      "；".join(flags), ""])
             ws.append(row)
             if flags:
                 for c in ws[ws.max_row]:
                     c.fill = yellow
-    widths = [8, 8, 12, 12, 12, 11, 9, 22, 22, 30, 26, 20]
+    widths = [8, 8] + [12] * len(DIMS) + [9, 22, 22, 30, 26, 20]
+    from openpyxl.utils import get_column_letter
     for i, w in enumerate(widths, 1):
-        ws.column_dimensions[chr(64 + i)].width = w
+        ws.column_dimensions[get_column_letter(i)].width = w
     for row in ws.iter_rows(min_row=3):
         for c in row:
             c.alignment = Alignment(vertical="top", wrap_text=True)
@@ -338,29 +343,30 @@ def build_review_ppt(agg, class_name, topic, grade_dist):
 # 打包
 # ─────────────────────────────────────────────────────────────
 
-def grade_dist_of(items):
-    """按总分/60 折四档做分布（A≥48 B≥36 C≥24 D<24），仅讲评总览用。"""
+def grade_dist_of(items, rubric):
+    """按总分占满分比例折四档（A≥80% B≥60% C≥40% D<40%），仅讲评总览用。"""
+    tm = total_max(rubric) or 1
     dist = {"A": 0, "B": 0, "C": 0, "D": 0}
     for it in items:
-        t = total_of(it.get("final_scores"))
-        g = "A" if t >= 48 else "B" if t >= 36 else "C" if t >= 24 else "D"
+        p = total_of(it.get("final_scores")) / tm
+        g = "A" if p >= 0.8 else "B" if p >= 0.6 else "C" if p >= 0.4 else "D"
         dist[g] += 1
     return dist
 
 
-def build_all_zip(items, class_name, topic, agg=None):
+def build_all_zip(items, class_name, topic, rubric, agg=None):
     """总打包：每生 PDF + 全班 Excel + 讲评 PPT（agg 为空则不含 PPT）。"""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for it in items:
             ids = it.get("student_ids") or []
-            pdf = build_student_pdf(it, class_name, topic)
+            pdf = build_student_pdf(it, class_name, topic, rubric)
             for sid in ids:      # 两人组：每人一份相同报告（2026-07-20 决策）
                 zf.writestr(f"学生报告/{sid}.pdf", pdf)
         zf.writestr(f"{class_name}_短视频成绩总表.xlsx",
-                    build_class_excel(items, class_name, topic))
+                    build_class_excel(items, class_name, topic, rubric))
         if agg:
             zf.writestr(f"{class_name}_短视频讲评.pptx",
                         build_review_ppt(agg, class_name, topic,
-                                         grade_dist_of(items)))
+                                         grade_dist_of(items, rubric)))
     return buf.getvalue()
