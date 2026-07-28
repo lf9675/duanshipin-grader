@@ -29,7 +29,7 @@ rubric 数据结构（JSON）：
 之后改模板不影响历史任务——同"引擎版本纪律"原则。
 """
 
-RUBRIC_TOOL_VERSION = "2026-07-20"
+RUBRIC_TOOL_VERSION = "2026-07-28"
 
 # ── 内置默认模板：刘老师《短视频评分表》（逐字录入，2026-07-20 定稿）──
 DEFAULT_RUBRIC = {
@@ -113,7 +113,10 @@ DEFAULT_RUBRIC = {
         "3. 内容设计：Hook、步骤主体、总结收尾三段齐全即入A档从9分起评；"
         "判断收尾是否存在必须以转写稿末段原文为准，不得凭感觉说缺。\n"
         "4. 拍摄与呈现：画面清楚即3分起步，较好4分；有多机位/特写/字幕"
-        "等任一用心之处即给5分；只有画面严重影响观看才低于3分。"
+        "等任一用心之处即给5分；只有画面严重影响观看才低于3分。\n"
+        "5. 照读封顶（2026-07-28 刘老师裁定）：明显捧着iPad/手机/讲稿照念的，"
+        "口语表达最高只能给到「及格」档上限（本表为12分）。判定以画面为准，"
+        "详见引擎 reading_gate 规则；此条由代码强制执行，不依赖你自行减分。"
     ),
 }
 
@@ -163,6 +166,37 @@ def level_of(dim, score):
             return lv
     return {"grade": "?", "label": "—", "lo": 0, "hi": dim.get("max", 0),
             "desc": ""}
+
+
+# 2026-07-28 决策（刘老师）：明显照读 → 口语类维度封顶到「及格」档上限。
+# 因为评分模板是老师可编辑的数据（不是写死的常量），封顶值不能硬编码成 12，
+# 必须从当前 rubric 里推出来。取值优先级如下，任一命中即返回。
+PASS_LABEL_KEYWORDS = ("及格", "合格", "尚可", "pass")
+
+
+def pass_ceiling(dim):
+    """返回该维度「及格」档的分数上限（照读封顶用）。
+
+    优先级：
+      1) label 或 desc 含"及格/合格"等字样的档位 → 取其 hi
+      2) 档位数 ≥3 → 取从高到低第 3 档（A/B/C 的 C）的 hi
+      3) 兜底 → 满分的 60%（向下取整）
+    默认《短视频评分表》口语表达：C档「及格」9–12 → 返回 12。
+    """
+    lvs = dim.get("levels") or []
+    for lv in lvs:
+        text = f"{lv.get('label', '')}{lv.get('desc', '')}".lower()
+        if any(kw in text for kw in PASS_LABEL_KEYWORDS):
+            try:
+                return int(lv["hi"])
+            except (KeyError, TypeError, ValueError):
+                break
+    if len(lvs) >= 3:
+        try:
+            return int(lvs[2]["hi"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    return int(dim.get("max", 0) * 0.6)
 
 
 def rubric_text_for_prompt(rubric, judges=None):
