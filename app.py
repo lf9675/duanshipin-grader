@@ -40,9 +40,19 @@ if "authed" not in st.session_state:
     st.session_state.authed = False
 if not st.session_state.authed:
     st.title("🎬 华文通 · 短视频批改")
+    # 2026-07-28 安全修复：原写法是 st.secrets.get("APP_PASSWORD", "")，
+    # Secrets 漏配时默认值为空字符串 → 空口令即可进入 = 公网无密码。
+    # 改为 fail-closed：没配就谁也进不来，并提示管理员去配。
+    _pw_expected = str(st.secrets.get("APP_PASSWORD", "") or "")
+    if not _pw_expected:
+        st.error("本平台尚未设置口令，暂时无法进入。")
+        st.info("管理员请到 Streamlit Cloud → Manage app → Settings → "
+                "Secrets，加一行：\n\n"
+                '`APP_PASSWORD = "自定口令"`\n\n保存后应用会自动重启。')
+        st.stop()
     pw = st.text_input("平台口令", type="password")
     if st.button("进入"):
-        if pw == st.secrets.get("APP_PASSWORD", ""):
+        if pw == _pw_expected:
             st.session_state.authed = True
             st.rerun()
         else:
