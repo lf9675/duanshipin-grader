@@ -10,6 +10,20 @@ video_engine.py — 短视频批改引擎（2026-07-20 常年化改版）
 - 两个客户端 180 秒硬超时；HTTP 报错带 API 名和响应体详情
 - 拍摄/画面维度批改失败降级不拖垮整份（2026-07-20 修复保留）
 - review_flags(item, rubric)：复核标黄规则按模板配置通用化
+
+# 2026-07-28 决策（刘老师）：新增「照读封顶」——明显捧着 iPad/手机/讲稿照念的，
+# 口语类维度（judge="text_speech"）封顶到该维度「及格」档上限
+# （默认《短视频评分表》= 12/20）。
+# 实现要点（三条，改动前务必读）：
+#   1. 封顶在 finalize_video_scores() 里由代码执行，不交给 AI 自行减分——
+#      作文平台已实证 AI 会"嘴上承认问题、手上照给高分"。
+#   2. 判定采【甲案】：画面证据是必要条件。只有文本迹象、画面拿不到实锤的，
+#      一律只标黄请老师抽听，不自动扣分（宁可漏判，不误伤背熟讲稿的学生）。
+#   3. 防误伤硬闸：本作业是"讲解技能"，教电子绘画/剪辑/App/照食谱做菜的学生
+#      手里本来就该拿设备。设备若是演示对象（device_is_demo_subject=true），
+#      一律不算照读。
+# 安全降级：画面维度批改失败/缺关键帧/模板无 frames 维度 → 拿不到画面证据
+#           → 永不封顶，只标黄。
 """
 
 import base64
@@ -21,11 +35,12 @@ import urllib.error
 
 from video_rubric import (dims, dim_by_key, dims_of_judge, total_max,
                           level_of, normalize_rubric, validate_rubric,
+                          pass_ceiling,
                           SPEECH_RATE_COMFORT, PAUSE_MANY, FILLER_MANY)
 from video_prompts import (build_text_grading_system, build_text_grading_user,
                            build_frames_prompt, RUBRIC_PARSE_SYSTEM)
 
-ENGINE_VERSION = "video-2.0-20260720"
+ENGINE_VERSION = "video-2.1-20260728"
 TIMEOUT_SEC = 180  # 硬超时，防止单份卡死整条队列
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
@@ -154,6 +169,120 @@ def _clamp_dim(dim, score):
     return max(0, min(dim["max"], s))
 
 
+# ─────────────────────────────────────────────────────────────
+# 照读判定与封顶（2026-07-28 刘老师裁定 · 甲案）
+# ─────────────────────────────────────────────────────────────
+
+DELIVERY_OBVIOUS = "明显照读"
+DELIVERY_SUSPECT = "疑似照读"
+DELIVERY_NATURAL = "自然讲述"
+
+
+def _as_bool(v):
+    """AI 可能回 true/false/"true"/"是"/None，统一成布尔。存疑一律 False。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "yes", "1", "是", "有")
+    return False
+
+
+def judge_reading(text_gate, frames_gate, frames_available):
+    """合并文本与画面证据，判定照读程度。
+
+    返回 dict：{delivery_mode, reason, text_signal, visual, evidence}
+
+    甲案判定表（画面证据是封顶的必要条件）：
+      画面实锤(手持非演示设备 + 视线全程) + 文本有迹象  → 明显照读（封顶）
+      画面实锤 + 文本无迹象                              → 疑似（只标黄）
+      视线间歇                                           → 疑似（只标黄）
+      无画面证据 + 文本迹象强                            → 疑似（只标黄）
+      其余                                               → 自然讲述
+    """
+    text_gate = text_gate or {}
+    frames_gate = frames_gate or {}
+
+    text_signal = str(text_gate.get("text_signal", "无")).strip() or "无"
+    if text_signal not in ("强", "弱", "无"):
+        text_signal = "无"
+
+    in_hand = _as_bool(frames_gate.get("device_in_hand"))
+    is_demo = _as_bool(frames_gate.get("device_is_demo_subject"))
+    gaze = str(frames_gate.get("gaze_on_device", "无")).strip() or "无"
+    if gaze not in ("全程", "间歇", "无"):
+        gaze = "无"
+
+    # 防误伤硬闸：设备本身就是被讲解的对象 → 一律不算照读
+    device_is_script = in_hand and not is_demo
+
+    visual_hard = frames_available and device_is_script and gaze == "全程"
+    visual_soft = frames_available and device_is_script and gaze == "间歇"
+
+    ev_parts = []
+    if frames_gate.get("evidence"):
+        ev_parts.append(f"画面：{frames_gate['evidence']}")
+    if text_gate.get("basis"):
+        ev_parts.append(f"转写稿：{text_gate['basis']}")
+    evidence = "；".join(ev_parts)
+
+    if visual_hard and text_signal in ("强", "弱"):
+        mode, reason = DELIVERY_OBVIOUS, "画面显示手持非演示设备且视线全程锁屏，转写稿亦呈书面语朗读特征"
+    elif visual_hard:
+        mode, reason = DELIVERY_SUSPECT, "画面像在照念，但转写稿口语感自然——请老师抽听确认"
+    elif visual_soft:
+        mode, reason = DELIVERY_SUSPECT, "画面显示间歇看稿（可能只是瞄提纲）——请老师抽听确认"
+    elif text_signal == "强" and not frames_available:
+        mode, reason = DELIVERY_SUSPECT, "转写稿呈明显书面语朗读特征，但无画面证据可佐证——请老师抽听确认"
+    elif text_signal == "强" and in_hand and is_demo:
+        # 手里那台设备已判定为演示道具（如教电子绘画/剪辑/照食谱做菜）。
+        # 不据此封顶，但转写稿仍很像稿子——可能在念画外的讲稿，请老师抽听。
+        mode, reason = DELIVERY_SUSPECT, ("画面中的设备已判定为演示道具、不作照读依据；"
+                                          "但转写稿呈书面语朗读特征，可能另有画外讲稿——请老师抽听确认")
+    elif text_signal == "强":
+        mode, reason = DELIVERY_SUSPECT, "转写稿呈书面语朗读特征，但画面未见照念——可能是讲稿背熟，请老师抽听确认"
+    else:
+        mode, reason = DELIVERY_NATURAL, ""
+
+    return {"delivery_mode": mode, "reason": reason,
+            "text_signal": text_signal,
+            "visual": {"device_in_hand": in_hand,
+                       "device_is_demo_subject": is_demo,
+                       "gaze_on_device": gaze,
+                       "frames_available": bool(frames_available)},
+            "evidence": evidence}
+
+
+def finalize_video_scores(rubric, result, final_scores, gate):
+    """在代码里确定性执行照读封顶。就地修改 result / final_scores。
+
+    只有 delivery_mode == 明显照读 才封顶；封顶目标 = 该维度「及格」档上限。
+    审计串写进 result["auto_caps"]，复核页会显示，老师可直接改回。
+    """
+    caps = []
+    result["reading_gate"] = gate
+    if gate.get("delivery_mode") != DELIVERY_OBVIOUS:
+        result["auto_caps"] = caps
+        return caps
+
+    for d in dims_of_judge(rubric, ("text_speech",)):
+        k = d["key"]
+        cur = final_scores.get(k)
+        if not isinstance(cur, (int, float)):
+            continue
+        ceil = pass_ceiling(d)
+        if cur > ceil:
+            final_scores[k] = ceil
+            info = result.setdefault("dimensions", {}).setdefault(k, {})
+            info["score"] = ceil
+            info["grade"] = level_of(d, ceil)["grade"]
+            info["capped_by"] = "照读封顶"
+            caps.append(f"「{d['name']}」判定为明显照读，"
+                        f"AI 原给 {int(cur)} 分 → 按规则封顶 {ceil} 分"
+                        f"（{level_of(d, ceil)['label']}档上限）")
+    result["auto_caps"] = caps
+    return caps
+
+
 def grade_one_item(item, frames_dir, deepseek_key, glm_key, topic,
                    rubric, requirements):
     """批一份。返回 (ai_result, final_scores)。异常抛给调用方记 failed。"""
@@ -175,6 +304,7 @@ def grade_one_item(item, frames_dir, deepseek_key, glm_key, topic,
 
     result = {"dimensions": {}}
     final_scores = {}
+    frames_result = None   # 2026-07-28：提到 if 外，模板无画面维度时也安全
 
     # 文本类维度（主力）
     if text_dims:
@@ -193,7 +323,6 @@ def grade_one_item(item, frames_dir, deepseek_key, glm_key, topic,
     # 画面类维度（失败降级不拖垮整份）
     if frame_dims:
         frames_error = ""
-        frames_result = None
         if frames_dir is not None:
             frame_paths = sorted(frames_dir.glob("frame_*.jpg"))
             if frame_paths:
@@ -233,6 +362,16 @@ def grade_one_item(item, frames_dir, deepseek_key, glm_key, topic,
             "score": 0, "grade": "?", "confidence": "none",
             "comment": "此维度设定为老师手评，AI 不评"}
         final_scores[d["key"]] = 0
+
+    # 照读封顶（2026-07-28）：必须放在所有维度评完之后。
+    # frames_available 为 False 时（GLM 失败/缺帧/模板无 frames 维度）
+    # 拿不到画面实锤 → judge_reading 只会判到"疑似"，不会封顶。
+    gate = judge_reading(
+        text_gate=result.pop("reading_gate", None),
+        frames_gate=(frames_result or {}).get("reading_gate")
+        if frame_dims else None,
+        frames_available=bool(frame_dims and frames_result))
+    finalize_video_scores(rubric, result, final_scores, gate)
 
     result["engine_version"] = ENGINE_VERSION
     return result, final_scores
@@ -308,6 +447,18 @@ def review_flags(item, rubric):
             flags.append(f"「{d['name']}」建议最高档但客观指标有异常，请抽听")
         if g == low_grade and bad_signals == 0:
             flags.append(f"「{d['name']}」建议最低档但客观指标正常，请抽听")
+
+    # 2.5 照读判定（2026-07-28）：封顶了要让老师看见并可推翻；
+    #     疑似的不扣分，但必须请老师抽听——这是甲案的核心
+    gate = ai.get("reading_gate") or {}
+    mode = gate.get("delivery_mode")
+    if mode == DELIVERY_OBVIOUS:
+        for c in (ai.get("auto_caps") or []):
+            flags.append(f"🔒{c}（如判断有误，直接改回分数即可）")
+        if not ai.get("auto_caps"):
+            flags.append("🔒判定为明显照读（口语分本已在及格档内，未再下调）")
+    elif mode == DELIVERY_SUSPECT:
+        flags.append(f"❓疑似照读，未扣分：{gate.get('reason', '')}")
 
     # 3. 总分极端（按满分比例：≥90% 或 ≤40%）
     tm = total_max(rubric)
