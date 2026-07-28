@@ -90,6 +90,26 @@ if open_id:
         else:
             st.caption("（音频不在本会话中——如需抽听请在主页重传批改包）")
 
+        # 照读判定横幅（2026-07-28）：封顶必须让老师看见证据、可一键推翻
+        gate = ai.get("reading_gate") or {}
+        gmode = gate.get("delivery_mode")
+        if gmode in ("明显照读", "疑似照读"):
+            box = st.error if gmode == "明显照读" else st.warning
+            caps = ai.get("auto_caps") or []
+            head = ("🔒 **判定：明显照读** — 口语类维度已按规则封顶"
+                    if gmode == "明显照读"
+                    else "❓ **判定：疑似照读** — 未扣分，请抽听后自行定夺")
+            v = gate.get("visual", {})
+            box(f"{head}\n\n"
+                f"- 理由：{gate.get('reason', '—')}\n"
+                f"- 证据：{gate.get('evidence') or '—'}\n"
+                f"- 画面：手持设备 {'是' if v.get('device_in_hand') else '否'}"
+                f"／属演示道具 {'是' if v.get('device_is_demo_subject') else '否'}"
+                f"／视线停留 {v.get('gaze_on_device', '—')}"
+                f"｜转写稿书面语迹象 {gate.get('text_signal', '—')}\n"
+                + ("".join(f"- {c}\n" for c in caps))
+                + "\n**AI 看走眼时，直接在下方把分数改回来即可，改动以老师为准。**")
+
         st.write(f"**一句话总评**：{ai.get('one_line_comment', '—')}")
         st.write(f"**口语指标**：语速 {metrics.get('speech_rate_cpm', '?')} 字/分 ｜ "
                  f"停顿 {metrics.get('long_pause_count', '?')} 次 ｜ "
