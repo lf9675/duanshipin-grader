@@ -16,6 +16,9 @@ app.py — 华文通·短视频批改 主页（上传 + 队列）
   断线后转写稿还在，批改可续；仅复核抽听和拍摄维度需要的媒体文件
   会丢失——重传对应视频即可补。
 - 备用通道：仍支持上传本地工具生成的批改包 zip（家里电脑可装 Python 时）。
+  2026-07-28 决策（刘老师）：备用通道改为【可多选】，一次能传好几个批改包。
+  逐包容错——某个包坏了/传错了只跳过它，不影响其余包；跨包同学号会提示覆盖。
+  总量仍受 1GB 闸门约束（Streamlit 把上传文件整个读进内存，云端容器约 1GB）。
 """
 
 import json
@@ -157,49 +160,114 @@ if ups:
         st.session_state.queue_running = True
         st.rerun()
 
+def _unpack_one_zip(zf, root, job_id, zip_name):
+    """解一个批改包。返回 (成功入队的 item_key 列表, 错误串列表)。"""
+    names = zf.namelist()
+    item_dirs = sorted({n.split("/")[0] for n in names
+                        if "/" in n and n.split("/")[0]
+                        and not n.split("/")[0].endswith(".json")})
+    # 2026-07-28：误传检测——包里全是视频原片，说明传错通道了。
+    # 原来这种情况静默显示"入队 0 份"，老师无从判断哪里出错。
+    if not item_dirs:
+        vids = [n for n in names if Path(n).suffix.lower() in
+                (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")]
+        if vids:
+            return [], [f"{zip_name}：这个包里装的是 {len(vids)} 个视频原片，"
+                        f"不是 yuchuli.py 生成的批改包。请改用上面的"
+                        f"「选择学生视频」直接传视频（不要打包）。"]
+        return [], [f"{zip_name}：包里没找到任何批改包目录（应形如 05/transcript.json）。"]
+
+    ok_keys, errs = [], []
+    for key in item_dirs:
+        try:
+            tjson = json.loads(
+                zf.read(f"{key}/transcript.json").decode("utf-8"))
+            summ = tjson["summary"]
+            for n in names:
+                if n.startswith(f"{key}/") and (
+                        n.endswith(".jpg") or n.endswith(".mp3")):
+                    target = root / n
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(zf.read(n))
+            db.upsert_item(job_id, key, summ["student_ids"],
+                           summ.get("source_file", ""),
+                           tjson["segments"],
+                           summ.get("metrics", {}),
+                           summ.get("precheck", {}))
+            ok_keys.append(key)
+        except KeyError:
+            errs.append(f"{zip_name} / {key}：缺 transcript.json 或字段不全，已跳过")
+        except Exception as e:
+            errs.append(f"{zip_name} / {key}：{e}")
+    return ok_keys, errs
+
+
 with st.expander("备用通道：上传本地工具生成的批改包 zip"):
     st.caption("家里电脑能装 Python 时，可用 local_tool/yuchuli.py 在本地"
                "预处理，云端零转写负担、速度最快。")
-    up_zip = st.file_uploader("批改包_*.zip", type="zip", key="zip_up")
-    if up_zip is not None and st.button("📥 批改包入队", disabled=not class_name):
-        job_id = st.session_state.get("job_id")
-        if not job_id:
-            job_id = db.create_job(class_name, topic, _rubric, requirements)
-            st.session_state.job_id = job_id
-        st.session_state.class_name = class_name
-        st.session_state.topic = topic
-        root = media_root() / str(job_id)
-        root.mkdir(parents=True, exist_ok=True)
-        ok, errs = 0, []
-        with zipfile.ZipFile(up_zip) as zf:
-            names = zf.namelist()
-            item_dirs = sorted({n.split("/")[0] for n in names
-                                if "/" in n and n.split("/")[0]
-                                and not n.split("/")[0].endswith(".json")})
-            for key in item_dirs:
+    # 2026-07-28：改为可多选（刘老师要求）。批改包本身只有一百多 MB，
+    # 多选几个正常不会超限；总量闸门与视频上传共用 1GB，理由同——
+    # Streamlit 把上传文件整个读进内存，云端容器约 1GB，超了会 OOM 崩溃。
+    up_zips = st.file_uploader("批改包_*.zip（可多选）", type="zip",
+                               key="zip_up", accept_multiple_files=True)
+    if up_zips:
+        zip_bytes = sum(z.size for z in up_zips)
+        st.write(f"已选 {len(up_zips)} 个批改包，共 "
+                 f"{zip_bytes / 1024 / 1024:.0f} MB")
+        if zip_bytes > MAX_BATCH_BYTES:
+            st.error(
+                f"本次总量 {zip_bytes / 1024 / 1024 / 1024:.1f} GB 超过 1GB 上限。"
+                f"请减少选择、分几次上传——分批上传互不覆盖，放心分。\n\n"
+                f"（若单个包就有好几百 MB，多半是把视频原片打进去了；"
+                f"yuchuli.py 生成的批改包通常只有一百多 MB。）")
+        elif st.button("📥 批改包入队", type="primary", disabled=not class_name):
+            job_id = st.session_state.get("job_id")
+            if not job_id:
+                job_id = db.create_job(class_name, topic, _rubric, requirements)
+                st.session_state.job_id = job_id
+            st.session_state.class_name = class_name
+            st.session_state.topic = topic
+            root = media_root() / str(job_id)
+            root.mkdir(parents=True, exist_ok=True)
+
+            all_errs, dup_msgs = [], []
+            seen = {}          # item_key -> 最早出现的包名（跨包重复检测）
+            n_ok = 0
+            prog = st.progress(0.0, text="正在解包…")
+            for i, uz in enumerate(up_zips):
+                zname = uz.name
+                prog.progress(i / len(up_zips), text=f"正在解包 {zname}…")
                 try:
-                    tjson = json.loads(
-                        zf.read(f"{key}/transcript.json").decode("utf-8"))
-                    summ = tjson["summary"]
-                    for n in names:
-                        if n.startswith(f"{key}/") and (
-                                n.endswith(".jpg") or n.endswith(".mp3")):
-                            target = root / n
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            target.write_bytes(zf.read(n))
-                    db.upsert_item(job_id, key, summ["student_ids"],
-                                   summ.get("source_file", ""),
-                                   tjson["segments"],
-                                   summ.get("metrics", {}),
-                                   summ.get("precheck", {}))
-                    ok += 1
+                    with zipfile.ZipFile(uz) as zf:
+                        keys, errs = _unpack_one_zip(zf, root, job_id, zname)
+                except zipfile.BadZipFile:
+                    all_errs.append(f"{zname}：不是有效的 zip 文件（可能上传中断），已跳过")
+                    continue
                 except Exception as e:
-                    errs.append(f"{key}: {e}")
-        st.success(f"入队 {ok} 份。")
-        for e in errs:
-            st.warning(e)
-        st.session_state.queue_running = True
-        st.rerun()
+                    all_errs.append(f"{zname}：打开失败 {e}，已跳过")
+                    continue
+                for k in keys:
+                    if k in seen:
+                        dup_msgs.append(f"学号 {k} 在《{seen[k]}》和《{zname}》"
+                                        f"里都有，后者已覆盖前者")
+                    else:
+                        seen[k] = zname
+                n_ok += len(keys)
+                all_errs.extend(errs)
+            prog.progress(1.0, text="解包完成")
+
+            if n_ok:
+                st.success(f"从 {len(up_zips)} 个批改包中入队 {n_ok} 份"
+                           f"（去重后 {len(seen)} 个学号）。")
+            else:
+                st.error("没有任何一份成功入队，请看下面的原因。")
+            for m in dup_msgs:
+                st.warning(m)
+            for e in all_errs:
+                st.warning(e)
+            if n_ok:
+                st.session_state.queue_running = True
+                st.rerun()
 
 # 历史任务恢复
 jobs = db.list_jobs()
