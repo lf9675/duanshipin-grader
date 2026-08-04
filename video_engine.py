@@ -35,12 +35,13 @@ import urllib.error
 
 from video_rubric import (dims, dim_by_key, dims_of_judge, total_max,
                           level_of, normalize_rubric, validate_rubric,
-                          pass_ceiling,
+                          pass_ceiling, total_level_of, member_mode,
+                          reading_cap_total,
                           SPEECH_RATE_COMFORT, PAUSE_MANY, FILLER_MANY)
 from video_prompts import (build_text_grading_system, build_text_grading_user,
                            build_frames_prompt, RUBRIC_PARSE_SYSTEM)
 
-ENGINE_VERSION = "video-2.1-20260728"
+ENGINE_VERSION = "video-2.2-20260804"
 TIMEOUT_SEC = 180  # 硬超时，防止单份卡死整条队列
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
@@ -281,6 +282,90 @@ def finalize_video_scores(rubric, result, final_scores, gate):
                         f"（{level_of(d, ceil)['label']}档上限）")
     result["auto_caps"] = caps
     return caps
+
+
+# ─────────────────────────────────────────────────────────────
+# 小组个人分（2026-08-04 刘老师裁定 C 案）
+# ════════════════════════════════════════════════════════════
+# 规则来源（刘老师原话）："如果小组视频的分数等级为二上（40-44），
+# 视频中表现优秀的同学（表达流利，完全脱稿）得分取上限 44；表现没那么好的
+# 学生（结结巴巴，无法脱稿）得分取下限 40。"
+#
+# 为什么不做全自动逐人判定（2026-08-04 决策，重要）：
+#   Whisper 转写稿【没有说话人标签】，AI 无法确定哪一段是第几位组员讲的；
+#   GLM-4V 只能从静帧数出人数和谁手持设备，无法与语音对齐。硬做全自动
+#   会安静地给错人扣分——比不做更糟。因此：AI 只出证据与预判，
+#   老师在复核页逐人确认，本函数据此确定性算分。
+# ─────────────────────────────────────────────────────────────
+
+MEMBER_MARKS = {
+    "top": "完全脱稿、表达流利",
+    "mid": "基本脱稿、偶有卡顿",
+    "low": "结结巴巴、无法脱稿",
+    "reading": "明显照读 iPad/讲稿",
+    "absent": "全程未出镜",
+}
+MEMBER_MARK_DEFAULT = "mid"
+
+
+def member_score(rubric, group_total, mark):
+    """组分定档 → 该档区间内按个人表现取位置。返回 (分数, 说明)。"""
+    lv = total_level_of(rubric, group_total)
+    if not lv:
+        return int(group_total), "模板未配总分等级表，个人分沿用组分"
+    lo, hi = int(lv["lo"]), int(lv["hi"])
+    band = f"{lv['grade']}·{lv['label']}（{lo}-{hi}）"
+
+    if mark == "absent":
+        return 0, f"全程未出镜，不套用组分（组分档位 {band}），请老师单独处理"
+
+    if mark == "reading":
+        cap = reading_cap_total(rubric)
+        base = lo
+        if cap is not None and base > cap:
+            return int(cap), (f"明显照读 → 取档底 {lo} 分后，"
+                              f"按规则封顶 {cap} 分（组分档位 {band}）")
+        return int(base), f"明显照读 → 取档底 {lo} 分（组分档位 {band}）"
+
+    if mark == "top":
+        return hi, f"完全脱稿、表达流利 → 取档顶 {hi} 分（{band}）"
+    if mark == "low":
+        return lo, f"结结巴巴、无法脱稿 → 取档底 {lo} 分（{band}）"
+    return (lo + hi) // 2, f"基本脱稿、偶有卡顿 → 取档中 {(lo + hi) // 2} 分（{band}）"
+
+
+def suggest_member_marks(ai_result, student_ids):
+    """从 AI 的 members 证据预填每人的档内位置标记。拿不准一律给 mid。"""
+    marks = {sid: MEMBER_MARK_DEFAULT for sid in student_ids}
+    members = (ai_result or {}).get("members") or []
+    if not isinstance(members, list):
+        return marks
+    for i, sid in enumerate(student_ids):
+        m = members[i] if i < len(members) else None
+        if not isinstance(m, dict):
+            continue
+        sf = str(m.get("script_free", "")).strip()
+        fl = str(m.get("fluency", "")).strip()
+        if sf == "明显念读":
+            marks[sid] = "low"        # 预填只到 low；reading 需画面实锤，由老师定
+        elif sf == "完全脱稿" and fl == "流利":
+            marks[sid] = "top"
+        elif fl == "结结巴巴":
+            marks[sid] = "low"
+    return marks
+
+
+def compute_member_scores(rubric, group_total, student_ids, marks=None):
+    """返回 {学号: {"mark","score","note"}}。marks 缺省一律 mid。"""
+    marks = marks or {}
+    out = {}
+    for sid in student_ids:
+        mk = marks.get(sid, MEMBER_MARK_DEFAULT)
+        if mk not in MEMBER_MARKS:
+            mk = MEMBER_MARK_DEFAULT
+        sc, note = member_score(rubric, group_total, mk)
+        out[sid] = {"mark": mk, "score": sc, "note": note}
+    return out
 
 
 def grade_one_item(item, frames_dir, deepseek_key, glm_key, topic,
