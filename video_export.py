@@ -11,6 +11,7 @@ video_export.py — 短视频批改导出（每生 PDF / 全班 Excel / 讲评 P
 """
 
 import io
+import json
 import os
 import zipfile
 from datetime import datetime, timezone, timedelta
@@ -31,10 +32,13 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 
-from video_rubric import dims, total_max, level_of
-from video_engine import total_of, review_flags
+from video_rubric import (dims, total_max, level_of,
+                          total_level_of, member_mode)
+from video_engine import total_of, review_flags, MEMBER_MARKS
 
-EXPORT_VERSION = "video-1.0-20260720"
+MEMBER_MARK_LABELS = MEMBER_MARKS
+
+EXPORT_VERSION = "video-2.0-20260804"
 
 NAVY = HexColor("#1F4E79")
 GOLD = HexColor("#f0c27f")
@@ -78,6 +82,8 @@ def _styles():
         "sec": s("sec", fontName="NotoSC-Bold", fontSize=11, leading=17,
                  textColor=NAVY, spaceBefore=8),
         "body": s("body"),
+        "big": s("big", fontName="NotoSC-Bold", fontSize=13, leading=20,
+                 textColor=NAVY),
         "small": s("small", fontSize=8.6, leading=14),
         "quote": s("quote", fontSize=8.6, leading=14,
                    textColor=HexColor("#555555"), leftIndent=6),
@@ -93,107 +99,118 @@ def _esc(t):
 # 每生 PDF
 # ─────────────────────────────────────────────────────────────
 
-def build_student_pdf(item, class_name, topic, rubric):
-    """item: video_batch_items 行（dict 化）。返回 bytes。"""
+def build_student_pdf(item, class_name, topic, rubric,
+                      sid=None, member=None):
+    """学生报告 PDF。
+
+    2026-08-04 改版（刘老师要求）：
+    - 抬头改成「第 NN 号视频」，全文不出现"学号"字样——一个视频里有好几位
+      同学，按学号称呼会让学生以为整份报告在说他一个人。
+    - B 案版式：总分与等级 + 四维度得分小表 + 2条优点 + 2条不足。
+      去掉 evidence 逐字引用、issues 三段式、口语小数据——那些是给老师
+      复核用的，学生看不完也用不上。
+    - 【隐私分层】组共享层（总分/等级/维度表/优点/不足）只评作品，绝不点名
+      个人；点名的内容全部放进"你个人的部分"，且只出现在该生自己那一份里。
+      理由：四五个人看同一份报告，写"某位同学在念稿"等于当众点名。
+    sid/member 为空时（个人作业模板）自动退化成原来的单人报告。
+    """
     _register_fonts()
     st = _styles()
     ai = item.get("ai_result") or {}
     dims_r = ai.get("dimensions", {})
     fs = item.get("final_scores") or {}
-    metrics = item.get("metrics") or {}
-    ids = item.get("student_ids") or []
     total = total_of(fs)
     DIMS = dims(rubric)
     TM = total_max(rubric)
+    tlv = total_level_of(rubric, total)
 
     buf = io.BytesIO()
     doc = BaseDocTemplate(buf, pagesize=A4,
-                          leftMargin=16 * mm, rightMargin=16 * mm,
-                          topMargin=14 * mm, bottomMargin=14 * mm)
+                          leftMargin=18 * mm, rightMargin=18 * mm,
+                          topMargin=16 * mm, bottomMargin=16 * mm)
     frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height)
     doc.addPageTemplates([PageTemplate(frames=[frame])])
     story = []
 
-    story.append(Paragraph("短视频作业批改报告", st["title"]))
+    # ── 抬头：按视频编号称呼，不出现学号 ──
+    vid_no = item.get("item_key") or ""
+    head = f"第 {vid_no} 号视频　小组作业批改报告" if vid_no else "短视频作业批改报告"
+    story.append(Paragraph(_esc(head), st["title"]))
     story.append(Paragraph(
-        f"班级 {_esc(class_name)} ｜ 学号 {_esc('、'.join(ids))} ｜ "
-        f"题目 {_esc(topic)} ｜ {_sg_today()}", st["sub"]))
+        f"{_esc(class_name)} ｜ 题目 {_esc(topic)} ｜ {_sg_today()}", st["sub"]))
     story.append(Spacer(1, 5 * mm))
 
-    # 总评 + 总分
-    story.append(Paragraph(f"<b>总分：{total} / {TM}</b>　　"
-                           f"{_esc(ai.get('one_line_comment', ''))}", st["body"]))
+    # ── 成绩：总分 + 等级 ──
+    if tlv:
+        story.append(Paragraph(
+            f"<b>小组成绩：{total} / {TM}　等级 {_esc(tlv['grade'])}"
+            f"（{_esc(tlv['label'])}）</b>", st["big"]))
+    else:
+        story.append(Paragraph(f"<b>总分：{total} / {TM}</b>", st["big"]))
     story.append(Spacer(1, 3 * mm))
 
-    # 四维度分数表
-    rows = [["评分维度", "等级", "得分", "评语"]]
+    # ── 四维度得分小表（B 案）──
+    rows = [["评分项", "得分", "等级"]]
     for d in DIMS:
-        k = d["key"]
-        sc = fs.get(k, 0)
+        sc = fs.get(d["key"], 0)
         lv = level_of(d, sc)
-        comment = dims_r.get(k, {}).get("comment", "")
-        if d.get("judge") == "text_speech":
-            comment = (comment + " ※此维度AI仅供参考，以老师听后判断为准").strip()
-        rows.append([f"{d['name']}（{d['max']}分）",
-                     f"{lv['grade']} {lv['label']}", f"{sc}",
-                     Paragraph(_esc(comment), st["small"])])
-    tbl = Table(rows, colWidths=[36 * mm, 20 * mm, 13 * mm, 95 * mm])
+        rows.append([d["name"], f"{sc} / {d['max']}",
+                     f"{lv['grade']} {lv['label']}"])
+    tbl = Table(rows, colWidths=[62 * mm, 32 * mm, 40 * mm])
     tbl.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), "NotoSC"),
         ("FONTNAME", (0, 0), (-1, 0), "NotoSC-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8.8),
+        ("FONTSIZE", (0, 0), (-1, -1), 9.5),
         ("BACKGROUND", (0, 0), (-1, 0), GRAY_BG),
         ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]))
     story.append(tbl)
+    story.append(Spacer(1, 4 * mm))
 
-    # 问题与改法（why_and_how 底线）
-    story.append(Paragraph("需要改进的地方（为什么 + 怎么改）", st["sec"]))
-    n = 0
-    for d in DIMS:
-        for iss in dims_r.get(d["key"], {}).get("issues", []):
-            n += 1
-            story.append(Paragraph(
-                f"<b>{n}. [{d['name']}] {_esc(iss.get('problem', ''))}</b>",
-                st["body"]))
-            story.append(Paragraph(f"为什么：{_esc(iss.get('why', ''))}", st["small"]))
-            story.append(Paragraph(f"怎么改：{_esc(iss.get('how', ''))}", st["small"]))
-            story.append(Spacer(1, 1.5 * mm))
-    if n == 0:
-        story.append(Paragraph("本次没有需要特别指出的问题，继续保持！", st["body"]))
+    # ── 优点（组共享层，只评作品）──
+    strengths = [x for x in (ai.get("report_strengths") or []) if str(x).strip()]
+    if not strengths:                      # 兼容旧批改记录
+        strengths = [x for x in [ai.get("top_strength")] if x]
+    if strengths:
+        story.append(Paragraph("做得好的地方", st["sec"]))
+        for x in strengths[:3]:
+            story.append(Paragraph(f"• {_esc(x)}", st["body"]))
 
-    # 亮点
-    praise = ai.get("praise_quotes", [])
-    if praise:
-        story.append(Paragraph("你的亮点句", st["sec"]))
-        for p in praise:
-            story.append(Paragraph(
-                f"[{_esc(p.get('t', ''))}] “{_esc(p.get('quote', ''))}” —— "
-                f"{_esc(p.get('why', ''))}", st["quote"]))
+    # ── 不足 + 怎么改 ──
+    imps = [x for x in (ai.get("report_improvements") or [])
+            if isinstance(x, dict) and str(x.get("what", "")).strip()]
+    if not imps and ai.get("top_issue"):   # 兼容旧批改记录
+        imps = [{"what": ai["top_issue"],
+                 "how": ai.get("next_level_advice", "")}]
+    if imps:
+        story.append(Paragraph("可以再改进的地方", st["sec"]))
+        for x in imps[:3]:
+            line = _esc(x.get("what", ""))
+            if str(x.get("how", "")).strip():
+                line += f"　→　{_esc(x['how'])}"
+            story.append(Paragraph(f"• {line}", st["body"]))
 
-    # 口语指标
-    story.append(Paragraph("口语小数据（供参考）", st["sec"]))
-    story.append(Paragraph(
-        f"语速 {metrics.get('speech_rate_cpm', '?')} 字/分钟 ｜ "
-        f"明显停顿 {metrics.get('long_pause_count', '?')} 次 ｜ "
-        f"嗯呃填充词 {metrics.get('filler_count', '?')} 次 ｜ "
-        f"“然后”出现 {metrics.get('ranhou_count', '?')} 次", st["small"]))
+    # ── 个人私有层（只出现在该生自己那一份）──
+    if member:
+        story.append(Spacer(1, 3 * mm))
+        story.append(Paragraph("你个人的部分", st["sec"]))
+        story.append(Paragraph(
+            f"<b>你的得分：{member.get('score', '')} / {TM}</b>", st["body"]))
+        if member.get("note"):
+            story.append(Paragraph(_esc(member["note"]), st["small"]))
+        if member.get("teacher_note"):
+            story.append(Paragraph(_esc(member["teacher_note"]), st["body"]))
 
-    # 距上一档建议 + 老师批注
-    adv = ai.get("next_level_advice", "")
-    if adv:
-        story.append(Paragraph("想再上一个档位，最该做的一件事", st["sec"]))
-        story.append(Paragraph(_esc(adv), st["body"]))
+    # ── 老师的话 ──
     if item.get("teacher_comment"):
         story.append(Paragraph("老师的话", st["sec"]))
         story.append(Paragraph(_esc(item["teacher_comment"]), st["body"]))
 
-    story.append(Spacer(1, 4 * mm))
-    story.append(Paragraph(
-        f"华文通·短视频批改 {EXPORT_VERSION} ｜ AI 批改 + 老师复核", st["sub"]))
+    story.append(Spacer(1, 6 * mm))
+    story.append(Paragraph("AI 批改 + 老师复核", st["sub"]))
     doc.build(story)
     return buf.getvalue()
 
@@ -209,9 +226,13 @@ def build_class_excel(items, class_name, topic, rubric):
     ws.title = "短视频成绩总表"
     DIMS = dims(rubric)
     TM = total_max(rubric)
-    header = (["学号", "组"]
+    MM = member_mode(rubric)
+    # 2026-08-04：小组模板多两列——个人分才是最终要录进成绩册的分数
+    header = (["学号", "视频编号"]
               + [f"{d['name']}/{d['max']}" for d in DIMS]
-              + [f"总分/{TM}", "主要问题", "突出优点",
+              + [f"组分/{TM}"]
+              + ([f"个人分/{TM}", "档内位置"] if MM else [])
+              + ["主要问题", "突出优点",
                  "距上一档建议", "复核提示", "教师最终评分（手写录入）"])
     ws.append([f"{class_name} 短视频作业 ｜ 题目：{topic} ｜ {_sg_today()}"])
     ws.append(header)
@@ -223,19 +244,27 @@ def build_class_excel(items, class_name, topic, rubric):
         fs = it.get("final_scores") or {}
         flags = review_flags(it, rubric)
         ids = it.get("student_ids") or []
-        group = "_".join(ids) if len(ids) > 1 else ""
+        key = it.get("item_key") or ""
+        ms = it.get("member_scores") or {}
+        if isinstance(ms, str):
+            ms = json.loads(ms)
         for sid in ids:
-            row = ([sid, group]
+            mem = ms.get(sid) or {}
+            row = ([sid, key]
                    + [fs.get(d["key"], "") for d in DIMS]
-                   + [total_of(fs),
-                      ai.get("top_issue", ""), ai.get("top_strength", ""),
+                   + [total_of(fs)]
+                   + ([mem.get("score", ""),
+                       MEMBER_MARK_LABELS.get(mem.get("mark"), "")]
+                      if MM else [])
+                   + [ai.get("top_issue", ""), ai.get("top_strength", ""),
                       ai.get("next_level_advice", ""),
                       "；".join(flags), ""])
             ws.append(row)
             if flags:
                 for c in ws[ws.max_row]:
                     c.fill = yellow
-    widths = [8, 8] + [12] * len(DIMS) + [9, 22, 22, 30, 26, 20]
+    widths = ([8, 10] + [12] * len(DIMS) + [9]
+              + ([9, 16] if MM else []) + [22, 22, 30, 26, 20])
     from openpyxl.utils import get_column_letter
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -354,15 +383,39 @@ def grade_dist_of(items, rubric):
     return dist
 
 
-def build_all_zip(items, class_name, topic, rubric, agg=None):
-    """总打包：每生 PDF + 全班 Excel + 讲评 PPT（agg 为空则不含 PPT）。"""
+def build_student_zip(items, class_name, topic, rubric):
+    """【发给学生的包】只有 PDF，一人一份。
+
+    2026-08-04 决策：与老师自留包彻底分开。原来 Excel（全班分数）和讲评 PPT
+    跟学生 PDF 混在同一个 ZIP 里，老师手一滑整包传上谷歌课室，全班分数就
+    公开了。分成两个包是防呆，不是洁癖。
+    小组模板：每位组员一份，文件名「组号_学号.pdf」，前半段（作品评价）
+    四五个人完全相同，后半段「你个人的部分」各不相同。
+    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for it in items:
             ids = it.get("student_ids") or []
-            pdf = build_student_pdf(it, class_name, topic, rubric)
-            for sid in ids:      # 两人组：每人一份相同报告（2026-07-20 决策）
-                zf.writestr(f"学生报告/{sid}.pdf", pdf)
+            key = it.get("item_key") or (ids[0] if ids else "unknown")
+            ms = it.get("member_scores") or {}
+            if isinstance(ms, str):
+                ms = json.loads(ms)
+            if member_mode(rubric) and ms:
+                for sid, mem in ms.items():
+                    pdf = build_student_pdf(it, class_name, topic, rubric,
+                                            sid=sid, member=mem)
+                    zf.writestr(f"{key}_{sid}.pdf", pdf)
+            else:
+                pdf = build_student_pdf(it, class_name, topic, rubric)
+                for sid in (ids or [key]):
+                    zf.writestr(f"{sid}.pdf", pdf)
+    return buf.getvalue()
+
+
+def build_teacher_zip(items, class_name, topic, rubric, agg=None):
+    """【老师自留的包】全班 Excel + 讲评 PPT。★绝不可发给学生★"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{class_name}_短视频成绩总表.xlsx",
                     build_class_excel(items, class_name, topic, rubric))
         if agg:
