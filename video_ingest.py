@@ -39,10 +39,38 @@ def get_ffmpeg():
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+# 2026-08-04：ffmpeg 失败信息翻译成老师看得懂的话。
+# 起因：iPhone 默认「高效率」格式录的 .mov 装的是 HEVC/H.265，若云端 ffmpeg
+# 编译时没带 HEVC 解码器，抽音频会失败——原来只抛一串英文 stderr，
+# 老师看到的是乱码般的报错，无从判断该怎么办。
+_FFMPEG_HINTS = [
+    (("hevc", "h.265", "h265"),
+     "这个视频是 HEVC/H.265 格式（iPhone「高效率」模式录的），"
+     "服务器解不开。请在 iPhone 上打开 设置 → 相机 → 格式 → 选「最兼容」"
+     "后重录，或把视频用「邮件／信息」分享一次转成 mp4 再上传。"),
+    (("moov atom not found", "invalid data found"),
+     "视频文件不完整或已损坏（常见于上传中断、或从聊天软件里存下来的残缺文件）。"
+     "请重新导出一次原视频再上传。"),
+    (("no such file", "does not exist"),
+     "找不到视频文件，可能是上传过程中断了，请重传。"),
+    (("permission denied",), "服务器读不到这个文件，请重传一次。"),
+]
+
+
+def _explain_ffmpeg_error(err_text):
+    low = (err_text or "").lower()
+    for keys, msg in _FFMPEG_HINTS:
+        if any(k in low for k in keys):
+            return msg
+    return ""
+
+
 def _run(cmd):
     p = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if p.returncode != 0:
-        raise RuntimeError(p.stderr.decode("utf-8", errors="ignore")[-800:])
+        raw = p.stderr.decode("utf-8", errors="ignore")[-800:]
+        hint = _explain_ffmpeg_error(raw)
+        raise RuntimeError(f"{hint}\n（技术细节：{raw[-300:]}）" if hint else raw)
 
 
 def parse_student_ids(stem):
