@@ -30,6 +30,7 @@ from pathlib import Path
 import streamlit as st
 
 import video_db as db
+from video_rubric import member_mode as rubric_member_mode
 import video_ingest as ingest
 from video_engine import grade_one_item, ENGINE_VERSION
 
@@ -123,6 +124,44 @@ _rubric = _r["rubric"] if not isinstance(_r["rubric"], str) else json.loads(_r["
 requirements = st.text_area("题目要求（写进批改提示词）",
                             value=_r["requirements"] or "", height=90)
 
+# ── 组员名单（2026-08-04，仅小组视频模板显示）────────────────
+# 一个视频对应 4-5 名组员，视频文件名里没有学号，必须靠这张表把
+# 「视频编号 → 学号」对上，才能一人一份报告、一人一个分数。
+_groups = {}
+if rubric_member_mode(_rubric):
+    st.markdown("**组员名单**（每行一组，格式 `视频编号: 学号,学号,…`）")
+    _roster = st.text_area(
+        "组员名单", height=110, label_visibility="collapsed",
+        placeholder="01: 05,12,18,23\n02: 07,09,14,21,25",
+        help="视频文件请命名成 01.mp4、02.mp4。这里的编号要和文件名对上。")
+    _bad = []
+    for _ln in (_roster or "").splitlines():
+        _ln = _ln.strip().replace("：", ":").replace("，", ",")
+        if not _ln:
+            continue
+        if ":" not in _ln:
+            _bad.append(_ln)
+            continue
+        _k, _v = _ln.split(":", 1)
+        _ids = [x.strip() for x in _v.split(",") if x.strip()]
+        if not _k.strip() or not _ids:
+            _bad.append(_ln)
+            continue
+        _groups[_k.strip()] = _ids
+    if _bad:
+        st.warning("这几行看不懂，已跳过：" + "；".join(_bad[:3]))
+    if _groups:
+        _dupe = {}
+        for _k, _ids in _groups.items():
+            for _i in _ids:
+                _dupe.setdefault(_i, []).append(_k)
+        _multi = {i: ks for i, ks in _dupe.items() if len(ks) > 1}
+        st.caption(f"已登记 {len(_groups)} 组、"
+                   f"{sum(len(v) for v in _groups.values())} 人")
+        if _multi:
+            st.error("同一个学号出现在多个组里："
+                     + "；".join(f"{i}→{'、'.join(k)}" for i, k in _multi.items()))
+
 ups = st.file_uploader(
     "选择学生视频（可多选；命名：个人 05.mp4，两人组 05_12.mp4）",
     type=["mp4", "mov", "m4v", "avi", "mkv", "webm"],
@@ -131,6 +170,17 @@ ups = st.file_uploader(
 if ups:
     total_bytes = sum(u.size for u in ups)
     st.write(f"已选 {len(ups)} 个视频，共 {total_bytes/1024/1024:.0f} MB")
+    # 2026-08-04：iPhone 原始 .mov 体积是同长度 mp4 的 3-5 倍，5 分钟常有
+    # 400-800MB，两三个就撞上 1GB 闸门。原来只报"总量超限"，老师会误以为
+    # 平台不收 mov（其实白名单一直有 mov），所以这里点名说清楚。
+    _big = [u.name for u in ups if u.size > 300 * 1024 * 1024]
+    if _big:
+        st.warning(
+            f"这 {len(_big)} 个文件单个就超过 300MB："
+            f"{'、'.join(_big[:3])}{'…' if len(_big) > 3 else ''}\n\n"
+            f"多半是 iPhone 原始 .mov。平台【收】mov，只是它太占地方，"
+            f"一次传不了几个。建议在手机上用「邮件／信息」分享一次"
+            f"（会自动转成小体积 mp4），或一次只传一两个。")
     if total_bytes > MAX_BATCH_BYTES:
         st.error(f"本次总量超过 1GB 上限（{total_bytes/1024/1024/1024:.1f} GB）。"
                  f"请减少选择、分几次上传——分批上传互不覆盖，放心分。")
@@ -139,6 +189,8 @@ if ups:
         if not job_id:
             job_id = db.create_job(class_name, topic, _rubric, requirements)
             st.session_state.job_id = job_id
+        if _groups:
+            db.set_job_groups(job_id, _groups)
         st.session_state.class_name = class_name
         st.session_state.topic = topic
         inbox = video_inbox(job_id)
