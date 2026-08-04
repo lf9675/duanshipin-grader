@@ -13,9 +13,9 @@ temperature=0.2；PPT 素材匿名化。
 """
 
 from video_rubric import (rubric_text_for_prompt, dims_of_judge, total_max,
-                          JUDGE_LABELS)
+                          member_mode, JUDGE_LABELS)
 
-PROMPTS_VERSION = "2026-07-28"
+PROMPTS_VERSION = "2026-08-04"
 
 # ─────────────────────────────────────────────────────────────
 # 照读判定（2026-07-28 刘老师裁定）
@@ -77,6 +77,72 @@ READING_GATE_FRAMES_JSON = (
 
 
 # ─────────────────────────────────────────────────────────────
+# 逐人证据（2026-08-04，小组视频作业专用 member_mode）
+# ════════════════════════════════════════════════════════════
+# 一个视频 4-5 名组员，个人分 = 组分档区间内按个人表现取位置。
+# ★ 已知限制（必须写在这里，避免以后有人误以为这能全自动）：
+#   Whisper 转写稿没有说话人标签，AI【无法确定】哪一段是第几位组员讲的。
+#   所以 members 只是【预填建议】，最终由老师在复核页逐人确认。
+#   宁可 AI 说"分不清"，也不要让它猜——猜错就是冤枉学生。
+# ─────────────────────────────────────────────────────────────
+
+MEMBER_EVIDENCE_TEXT_RULE = """
+【逐人表现登记（members）— 只作预填建议，不许你据此给分】
+本作业是 4-5 人小组视频，每人讲一个要点。请从转写稿里【尽力】按讲述顺序
+切出每一位组员的发言段，逐人登记。判断依据：话题切换、"接下来由我/我来说说"
+一类的交接语、语气与用词习惯的明显变化。
+★ 硬性要求：你【看不到】说话人标签，切不准是正常的。切不出来就把
+  segment_hint 填"分不清"，fluency 与 script_free 填"无法判断"。
+  【严禁】为了凑数而猜——猜错会导致学生被冤枉扣分。
+"""
+
+MEMBER_EVIDENCE_TEXT_JSON = (
+    ' "members": [{"slot": 1, "segment_hint": "0:12-1:05 或 分不清", '
+    '"point_covered": "他讲的是哪个要点，10字内", '
+    '"fluency": "流利/偶有卡顿/结结巴巴/无法判断", '
+    '"script_free": "完全脱稿/偶尔看稿/明显念读/无法判断", '
+    '"basis": "20字内，引一小段原文说明"}],')
+
+MEMBER_EVIDENCE_FRAMES_RULE = """
+【逐人出镜登记（members）】
+本组共 {n} 名学生。请从关键帧里数清【实际出现过几张不同的面孔】，逐人登记：
+是否手持 iPad/手机/稿纸、视线是否长时间落在上面。
+★ 数不清、看不清就把 count_seen 填 0 并在 note 说明"帧太小数不清"，
+  【严禁】按题目给的人数硬凑——数不清不扣分，是本作业的明文规则。
+"""
+
+MEMBER_EVIDENCE_FRAMES_JSON = (
+    ' "members": [{"slot": 1, "device_in_hand": true或false, '
+    '"gaze_on_device": "全程/间歇/无"}], "count_seen": 实际数到的不同面孔数,')
+
+# ── 学生报告文风（2026-08-04 刘老师要求）──────────────────────
+# 原话："生成给学生的报告要尽量去掉AI味，不要说太多，只要说优点和不足就可以，
+#        说人话，用简洁的语言说学生能看懂的话。"
+# 因此新增 report_strengths / report_improvements 两个字段，PDF 只印这两块。
+# 旧字段（evidence / issues / next_level_advice）保留供老师复核页和讲评 PPT 用，
+# 不再进学生 PDF——老师看的和学生看的，详略本来就该不同。
+
+REPORT_STYLE_RULE = """
+【写给学生看的评语（report_strengths / report_improvements）】
+这两个字段会【原样印在学生拿到的报告上】，写法要求：
+1. 像老师当面跟学生说话，不像报告。一句话就是一句话，不要长句套长句。
+2. 优点 2 条、不足 2 条，每条 30 字以内。不足要连着说一句怎么改，20 字以内。
+3. 【禁用】这些词：维度、层次、逻辑性、感染力、有效、进一步、整体而言、
+   综上所述、建议加强、有待提升、value、structure。
+4. 【禁用】开场白和总结句（"总的来说""希望你继续努力"）——直接说事。
+5. 必须具体到这个视频里真实发生的事，不能是换个作业也能用的套话。
+   反例："内容不够深入，建议增加更多细节。"（换谁都能用 → 不合格）
+   正例："讲新生水那段只说了'很干净'，可以补一句它是怎么处理出来的。"
+6. 全部用学生看得懂的话。不确定学生懂不懂的词，换一个。
+"""
+
+REPORT_STYLE_JSON = (
+    ' "report_strengths": ["优点1，30字内", "优点2，30字内"],\n'
+    ' "report_improvements": [{"what": "不足1，30字内", "how": "怎么改，20字内"}, '
+    '{"what": "不足2", "how": "怎么改"}],')
+
+
+# ─────────────────────────────────────────────────────────────
 # 1. DeepSeek 文本批改（text + text_speech 维度）
 # ─────────────────────────────────────────────────────────────
 
@@ -103,6 +169,9 @@ def build_text_grading_system(rubric, requirements):
         # 2026-07-28：有口语类维度才需要登记照读迹象
         reading_block = READING_GATE_TEXT_RULE + "\n"
         reading_json = READING_GATE_TEXT_JSON + "\n"
+    # 2026-08-04：小组作业模板才要逐人证据；个人作业模板保持原样
+    member_block = MEMBER_EVIDENCE_TEXT_RULE + "\n" if member_mode(rubric) else ""
+    member_json = MEMBER_EVIDENCE_TEXT_JSON + "\n" if member_mode(rubric) else ""
     stance = rubric.get("stance", "")
     stance_block = (f"【宽严指引（老师定，必须遵守）】\n{stance}\n\n"
                     if stance else "")
@@ -113,7 +182,8 @@ def build_text_grading_system(rubric, requirements):
 
 {rubric_text_for_prompt(rubric, ('text', 'text_speech'))}
 
-{reading_block}重要规则：
+{reading_block}{member_block}{REPORT_STYLE_RULE}
+重要规则：
 0. 评分顺序：先判断该维度整体属于哪一档，再在档内定位分数。宽严指引里的起评锚点优先于你的默认判断；单条瑕疵只在档内扣分（每条最多1分），不得因单条瑕疵跨档。引用不存在的缺陷（如转写稿里明明有总结却说缺总结）是严重错误。
 1. 转写稿可能有少量转写错字，明显是同音转写错误的不要算学生的问题。
 2. 每个维度的 evidence 必须逐字引用转写稿原文（不许改写），并带时间戳，好的差的都要引。
@@ -126,7 +196,8 @@ def build_text_grading_system(rubric, requirements):
  "dimensions": {{
 {chr(10).join(dim_json_parts)}
  }},
-{reading_json} "one_line_comment": "给学生的一句话总评（先扬后抑，具体）",
+{reading_json}{member_json}{REPORT_STYLE_JSON}
+ "one_line_comment": "给学生的一句话总评（先扬后抑，具体，40字内）",
  "top_issue": "最主要的一个问题（十字以内短语）",
  "top_strength": "最突出的一个优点（十字以内短语）",
  "next_level_advice": "距上一档最该做的一件事（一两句）",
@@ -174,6 +245,10 @@ def build_frames_prompt(rubric, n_frames, n_students, requirements):
     dim_json = ", ".join(
         f'"{d["key"]}": {{"score": 0到{d["max"]}整数, "grade": "档位字母"}}'
         for d in frame_dims)
+    # 2026-08-04：小组模板才登记逐人出镜
+    mem_rule = (MEMBER_EVIDENCE_FRAMES_RULE.format(n=n_students)
+                if member_mode(rubric) else "")
+    mem_json = MEMBER_EVIDENCE_FRAMES_JSON + "\n" if member_mode(rubric) else ""
     return f"""下面这张图是按时间顺序从左到右、从上到下排列的关键帧拼贴（共{n_frames}帧）。这是新加坡中学生短视频作业，本组共 {n_students} 名学生。作业要求：{requirements or '（未填写）'}
 
 请按下列标准评画面类维度：
@@ -183,10 +258,10 @@ def build_frames_prompt(rubric, n_frames, n_students, requirements):
 {stance_block}判断要点：
 1. 你看不到动态画面和剪辑，只按静帧判断，把不确定写进 note。
 {face_rule}3. 画面是否清晰（对焦、光线）、构图是否合理、演示对象是否看得清楚。
-{READING_GATE_FRAMES_RULE}
+{READING_GATE_FRAMES_RULE}{mem_rule}
 只输出 JSON（不要 markdown 围栏）：
 {{"dimensions": {{{dim_json}}}, {face_field}
-{READING_GATE_FRAMES_JSON}
+{mem_json}{READING_GATE_FRAMES_JSON}
  "comment": "两句评语，具体指出画面优缺点",
  "note": "需要老师亲眼确认的事项（没有则空字符串）"}}"""
 
