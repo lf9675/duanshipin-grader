@@ -17,6 +17,9 @@ import streamlit as st
 import video_db as db
 from video_rubric import dims, level_of, JUDGE_LABELS
 from video_engine import review_flags, total_of
+from video_engine import (MEMBER_MARKS, compute_member_scores,
+                           suggest_member_marks)
+from video_rubric import member_mode, total_level_of
 
 st.set_page_config(page_title="复核 · 短视频批改", page_icon="✅",
                    layout="wide")
@@ -172,6 +175,47 @@ if open_id:
                     pre[k] = st.checkbox(label, value=bool(pre.get(k, True)),
                                          key=f"pc_{it['id']}_{k}")
 
+        # ── 逐人给分（2026-08-04，小组视频模板专用）──────────────
+        # AI 分不清哪段是谁讲的（转写稿没有说话人标签），所以这里只做
+        # 【AI 预填 + 老师一点】。老师改一下比 AI 猜错冤枉学生强得多。
+        member_marks = {}
+        if member_mode(RUBRIC):
+            _ids = it.get("student_ids") or []
+            _saved = it.get("member_scores") or {}
+            if isinstance(_saved, str):
+                _saved = json.loads(_saved)
+            _group_total = sum(v for v in new_scores.values()
+                               if isinstance(v, (int, float)))
+            _tlv = total_level_of(RUBRIC, _group_total)
+            st.markdown("**逐人给分**　"
+                        + (f"组分 {_group_total} → {_tlv['grade']}·{_tlv['label']}"
+                           f"（{_tlv['lo']}-{_tlv['hi']} 分）" if _tlv else ""))
+            st.caption("组分定档后，每人在档内按个人表现取位置。AI 已预填，"
+                       "请逐人核对——AI 无法分辨谁是谁，预填仅供参考。")
+            _sugg = suggest_member_marks(ai, _ids)
+            _opts = list(MEMBER_MARKS.keys())
+            _mcols = st.columns(max(len(_ids), 1))
+            for _i, _sid in enumerate(_ids):
+                _cur = (_saved.get(_sid) or {}).get("mark") or _sugg.get(_sid, "mid")
+                with _mcols[_i]:
+                    member_marks[_sid] = st.selectbox(
+                        f"学号 {_sid}", _opts,
+                        index=_opts.index(_cur) if _cur in _opts else 1,
+                        format_func=lambda k: MEMBER_MARKS[k],
+                        key=f"mm_{it['id']}_{_sid}")
+            _preview = compute_member_scores(RUBRIC, _group_total, _ids,
+                                             member_marks)
+            st.caption("　｜　".join(
+                f"{sid} → **{v['score']}分**" for sid, v in _preview.items()))
+            _capped = [sid for sid, v in _preview.items()
+                       if v["mark"] == "reading"]
+            if _capped:
+                st.warning(f"🔒 学号 {'、'.join(_capped)} 判为明显照读，"
+                           f"个人总分已按规则封顶。如判断有误，改回上面的下拉即可。")
+            if not _ids:
+                st.error("这个视频没有登记组员名单——请回主页在「组员名单」里"
+                         "补上这一组，否则学生报告发不出去。")
+
         comment = st.text_area("老师批注（会进学生 PDF 的「老师的话」）",
                                value=it.get("teacher_comment", ""),
                                key=f"tc_{it['id']}")
@@ -181,11 +225,23 @@ if open_id:
             if st.button("💾 保存并确认此份", type="primary",
                          key=f"ok_{it['id']}"):
                 db.save_review(it["id"], new_scores, comment, pre, "confirmed")
+                if member_mode(RUBRIC) and member_marks:
+                    db.save_member_scores(it["id"], compute_member_scores(
+                        RUBRIC,
+                        sum(v for v in new_scores.values()
+                            if isinstance(v, (int, float))),
+                        it.get("student_ids") or [], member_marks))
                 st.session_state.open_item = None
                 st.rerun()
         with b2:
             if st.button("💾 仅保存（不确认）", key=f"sv_{it['id']}"):
                 db.save_review(it["id"], new_scores, comment, pre, "graded")
+                if member_mode(RUBRIC) and member_marks:
+                    db.save_member_scores(it["id"], compute_member_scores(
+                        RUBRIC,
+                        sum(v for v in new_scores.values()
+                            if isinstance(v, (int, float))),
+                        it.get("student_ids") or [], member_marks))
                 st.rerun()
         with b3:
             if st.button("⛔ 打回（不符准入要求）", key=f"rj_{it['id']}"):
