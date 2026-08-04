@@ -15,7 +15,8 @@ import streamlit as st
 
 import video_db as db
 from video_engine import _post_json, _extract_json, DEEPSEEK_URL
-from video_export import build_all_zip, grade_dist_of, EXPORT_VERSION
+from video_export import (build_student_zip, build_teacher_zip,
+                          grade_dist_of, EXPORT_VERSION)
 from video_prompts import REVIEW_AGG_SYSTEM, build_review_agg_user
 
 st.set_page_config(page_title="下载 · 短视频批改", page_icon="📦",
@@ -85,24 +86,50 @@ if st.button("🏗 生成全部文件", type="primary"):
             except Exception as e:
                 st.warning(f"讲评聚合失败（{e}），本次 ZIP 不含 PPT，"
                            f"可稍后重试。")
+    # 2026-08-04 决策：拆成两个包。原来 Excel（全班分数）和讲评 PPT 与
+    # 学生 PDF 混在同一个 ZIP 里，老师手一滑整包传上谷歌课室，全班分数
+    # 就公开了。这是防呆设计，不是洁癖。
     with st.spinner("正在生成 PDF / Excel / PPT 并打包…"):
+        _stamp = datetime.now().strftime("%Y%m%d")
         try:
-            blob = build_all_zip(confirmed, job["class_name"],
-                                 job["topic"], RUBRIC, agg)
-            st.session_state.final_zip = blob
-            st.session_state.final_zip_name = (
-                f"{job['class_name']}_短视频批改_"
-                f"{datetime.now().strftime('%Y%m%d')}.zip")
+            st.session_state.stu_zip = build_student_zip(
+                confirmed, job["class_name"], job["topic"], RUBRIC)
+            st.session_state.stu_zip_name = (
+                f"{job['class_name']}_发给学生_{_stamp}.zip")
         except Exception as e:
-            st.error(f"打包失败：{e}")
+            st.error(f"学生包打包失败：{e}")
+        try:
+            st.session_state.tea_zip = build_teacher_zip(
+                confirmed, job["class_name"], job["topic"], RUBRIC, agg)
+            st.session_state.tea_zip_name = (
+                f"{job['class_name']}_老师自留_{_stamp}.zip")
+        except Exception as e:
+            st.error(f"老师包打包失败：{e}")
 
-if st.session_state.get("final_zip"):
-    st.download_button(
-        "⬇️ 下载总包（可多次下载）",
-        data=st.session_state.final_zip,
-        file_name=st.session_state.final_zip_name,
-        mime="application/zip", type="primary")
+if st.session_state.get("stu_zip") or st.session_state.get("tea_zip"):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("#### 📤 发给学生的")
+        st.caption("里面只有 PDF，一人一份。可以放心发。")
+        if st.session_state.get("stu_zip"):
+            st.download_button(
+                "⬇️ 下载学生包", data=st.session_state.stu_zip,
+                file_name=st.session_state.stu_zip_name,
+                mime="application/zip", type="primary",
+                key="dl_stu")
+    with c2:
+        st.markdown("#### 🔒 老师自留的")
+        st.caption("全班成绩总表 + 讲评 PPT。**绝不可发给学生。**")
+        if st.session_state.get("tea_zip"):
+            st.download_button(
+                "⬇️ 下载老师包", data=st.session_state.tea_zip,
+                file_name=st.session_state.tea_zip_name,
+                mime="application/zip", key="dl_tea")
+
     st.markdown("""**下一步（谷歌课室分发）**
-1. 解压总包，`学生报告/` 里是每人一份 PDF（两人组各有一份）。
-2. 在谷歌课室该作业下，逐个学生「退还」并附上对应 PDF。
-3. Excel 总表留档；讲评 PPT 是底稿，上课前按需增删。""")
+
+1. 解压**学生包**，里面是 `组号_学号.pdf`（如 `01_05.pdf`）。
+2. 在谷歌课室该作业下，进成绩簿 → 点该学生的格子 → 添加附件（传他那一份）
+   → 退还。这份附件**只有他本人和你**看得到。
+3. ❌ 不要把 PDF 放在课业说明区的附件——那是全班可见的。
+4. ❌ 不要把**老师包**里的 Excel 或 PPT 发给学生。""")
