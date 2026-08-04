@@ -101,6 +101,9 @@ CREATE TABLE IF NOT EXISTS video_batch_jobs (
 -- 2026-07-20 常年化：任务保存模板【快照】，改模板不影响历史任务
 ALTER TABLE video_batch_jobs ADD COLUMN IF NOT EXISTS rubric JSONB;
 ALTER TABLE video_batch_jobs ADD COLUMN IF NOT EXISTS requirements TEXT NOT NULL DEFAULT '';
+-- 2026-08-04 小组视频：一个视频对应多名组员，名单挂在任务上
+-- 结构 {"01": ["05","12","18","23"], "02": [...]}  组号 → 学号列表
+ALTER TABLE video_batch_jobs ADD COLUMN IF NOT EXISTS group_members JSONB;
 CREATE TABLE IF NOT EXISTS video_batch_items (
     id            BIGSERIAL PRIMARY KEY,
     job_id        BIGINT NOT NULL REFERENCES video_batch_jobs(id) ON DELETE CASCADE,
@@ -120,12 +123,17 @@ CREATE TABLE IF NOT EXISTS video_batch_items (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (job_id, item_key)
 );
+-- 2026-08-04 小组视频：逐人个人分与老师逐人确认的档内位置
+-- 结构 {"05": {"mark":"top","score":44,"note":"…"}, …}
+ALTER TABLE video_batch_items ADD COLUMN IF NOT EXISTS member_scores JSONB;
 CREATE INDEX IF NOT EXISTS idx_video_items_job ON video_batch_items(job_id);
 """
 
 
 def init_schema():
-    from video_rubric import DEFAULT_RUBRIC, DEFAULT_REQUIREMENTS
+    from video_rubric import (DEFAULT_RUBRIC, DEFAULT_REQUIREMENTS,
+                              GROUP_VIDEO_RUBRIC, GROUP_VIDEO_REQUIREMENTS,
+                              normalize_rubric)
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -139,6 +147,19 @@ def init_schema():
                 (DEFAULT_RUBRIC["name"],
                  json.dumps(DEFAULT_RUBRIC, ensure_ascii=False),
                  DEFAULT_REQUIREMENTS))
+        # 2026-08-04：播种小组视频内置模板（按模板名判重，只插一次；
+        # 老师改过之后不会被覆盖——与技能讲解模板的强制同步策略不同，
+        # 因为这份模板老师可能会自己调档位描述）
+        normalize_rubric(GROUP_VIDEO_RUBRIC)
+        cur.execute("SELECT count(*) FROM video_rubrics WHERE name=%s",
+                    (GROUP_VIDEO_RUBRIC["name"],))
+        if cur.fetchone()[0] == 0:
+            cur.execute(
+                "INSERT INTO video_rubrics (name, rubric, requirements) "
+                "VALUES (%s, %s, %s)",
+                (GROUP_VIDEO_RUBRIC["name"],
+                 json.dumps(GROUP_VIDEO_RUBRIC, ensure_ascii=False),
+                 GROUP_VIDEO_REQUIREMENTS))
         # 老任务回填默认模板快照（升级兼容）
         cur.execute(
             "UPDATE video_batch_jobs SET rubric=%s, requirements=%s "
@@ -193,6 +214,25 @@ def create_rubric(name, rubric, requirements, teacher_id="default"):
         conn.close()
 
 
+def update_rubric(rubric_id, name, rubric, requirements):
+    """就地改模板（2026-08-04 新增）。
+
+    历史任务持有快照，改这里不影响已批改的记录——所以改模板是安全的，
+    不必"删了重建"。重建反而会丢掉模板 id 的连续性。
+    """
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE video_rubrics SET name=%s, rubric=%s, requirements=%s "
+            "WHERE id=%s",
+            (name, json.dumps(rubric, ensure_ascii=False),
+             requirements, rubric_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def delete_rubric(rubric_id):
     """只删模板本身；历史任务持有快照不受影响。"""
     conn = get_conn()
@@ -220,6 +260,32 @@ def create_job(class_name, topic, rubric, requirements, teacher_id="default"):
         job_id = cur.fetchone()[0]
         conn.commit()
         return job_id
+    finally:
+        conn.close()
+
+
+def set_job_groups(job_id, groups):
+    """存组员名单 {"01": ["05","12"], …}（2026-08-04 小组视频）。"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE video_batch_jobs SET group_members=%s WHERE id=%s",
+                    (json.dumps(groups, ensure_ascii=False), job_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_member_scores(item_id, member_scores):
+    """存老师复核后的逐人个人分（2026-08-04）。"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE video_batch_items SET member_scores=%s, updated_at=now() "
+            "WHERE id=%s",
+            (json.dumps(member_scores, ensure_ascii=False), item_id))
+        conn.commit()
     finally:
         conn.close()
 
